@@ -1545,6 +1545,7 @@ export default function ProviderDetailPage() {
           setAddConnectionError("");
           setShowAddApiKeyModal(false);
         }}
+        connectionsCount={connections.length}
       />
       <EditConnectionModal
         isOpen={showEditModal}

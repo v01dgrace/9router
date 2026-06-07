@@ -3,11 +3,11 @@
 import { useState } from "react";
 import PropTypes from "prop-types";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
-import { AI_PROVIDERS } from "@/shared/constants/providers";
+import { AI_PROVIDERS, OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/providers";
 
 const BULK_PLACEHOLDER = `name1|sk-key1\nname2|sk-key2\nsk-key-only-auto-named`;
 
-export default function AddApiKeyModal({ isOpen, provider, providerName, isCompatible, isAnthropic, authType, authHint, website, proxyPools, error, onSave, onBulkDone, onClose }) {
+export default function AddApiKeyModal({ isOpen, provider, providerName, isCompatible, isAnthropic, authType, authHint, website, proxyPools, error, onSave, onBulkDone, onClose, connectionsCount = 0 }) {
   const NONE_PROXY_POOL_VALUE = "__none__";
   const isOllamaLocal = provider === "ollama-local";
   const isCookie = authType === "cookie";
@@ -21,6 +21,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const isCloudflareAi = provider === "cloudflare-ai";
   const providerRegions = AI_PROVIDERS?.[provider]?.regions || null;
   const defaultRegion = AI_PROVIDERS?.[provider]?.defaultRegion || providerRegions?.[0]?.id || "";
+
+  const isOAuthOnly = !!OAUTH_PROVIDERS[provider] && !APIKEY_PROVIDERS[provider] && !(OAUTH_PROVIDERS[provider]?.authModes || []).includes("apikey");
+  const supportsBulk = !isOllamaLocal && !isOAuthOnly;
 
   const [formData, setFormData] = useState({
     name: "",
@@ -142,7 +145,16 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         const res = await fetch("/api/providers", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, apiKey, name, priority: 1, testStatus: "unknown" }),
+          body: JSON.stringify({
+            provider,
+            apiKey,
+            name,
+            priority: formData.priority,
+            proxyPoolId: formData.proxyPoolId === NONE_PROXY_POOL_VALUE ? null : formData.proxyPoolId,
+            testStatus: "unknown",
+            defaultModel: isCompatible ? formData.defaultModel.trim() : undefined,
+            providerSpecificData: buildProviderSpecificData()
+          }),
         });
         if (res.ok) success++;
         else failed++;
@@ -161,13 +173,24 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     <Modal isOpen={isOpen} title={`Add ${providerName || provider} ${credentialLabel}`} onClose={onClose}>
       <div className="flex flex-col gap-4">
         {/* Mode switcher */}
-        <div className="flex gap-2">
-          <Button size="sm" variant={mode === "single" ? "primary" : "ghost"} onClick={() => { setMode("single"); setBulkResult(null); }}>Single</Button>
-          <Button size="sm" variant={mode === "bulk" ? "primary" : "ghost"} onClick={() => { setMode("bulk"); setBulkResult(null); }}>Bulk Add</Button>
-        </div>
+        {supportsBulk && (
+          <div className="flex gap-2">
+            <Button size="sm" variant={mode === "single" ? "primary" : "ghost"} onClick={() => { setMode("single"); setBulkResult(null); }}>Single</Button>
+            <Button size="sm" variant={mode === "bulk" ? "primary" : "ghost"} onClick={() => { setMode("bulk"); setBulkResult(null); }}>Bulk Add</Button>
+          </div>
+        )}
 
-        {mode === "bulk" && (
+        {mode === "bulk" && supportsBulk && (
           <div className="flex flex-col gap-3">
+            {isCompatible && (
+              <div className="rounded border border-yellow-600/30 bg-yellow-500/10 p-3 text-xs text-yellow-600 dark:text-yellow-400">
+                {connectionsCount > 0 ? (
+                  <p>⚠️ OpenAI/Anthropic Compatible nodes only allow exactly one connection. Since you already have a connection configured, any additions will fail.</p>
+                ) : (
+                  <p>⚠️ OpenAI/Anthropic Compatible nodes only allow exactly one connection. If you add multiple keys, only the first one will succeed.</p>
+                )}
+              </div>
+            )}
             <p className="text-xs text-text-muted">One key per line. Format: <code>name|apiKey</code> or just <code>apiKey</code> (auto-named by index).</p>
             <textarea
               className="w-full rounded border border-accent/30 bg-sidebar p-2 text-sm font-mono resize-y min-h-[140px] focus:outline-none focus:ring-1 focus:ring-primary"
@@ -386,4 +409,5 @@ AddApiKeyModal.propTypes = {
   onSave: PropTypes.func.isRequired,
   onBulkDone: PropTypes.func,
   onClose: PropTypes.func.isRequired,
+  connectionsCount: PropTypes.number,
 };
