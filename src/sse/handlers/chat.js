@@ -90,23 +90,40 @@ export async function handleChat(request, clientRawRequest = null) {
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
   // Check if model is a combo (has multiple models with fallback)
-  const comboModels = await getComboModels(modelStr);
+  let activeModelStr = modelStr;
+
+  // Canary Routing: 5% of requests to "github/auto-canary" are routed to the experimental pool,
+  // while the other 95% are routed to the stable pool. Can be completely disabled via settings.
+  if (modelStr === "github/auto-canary" || modelStr === "gh/auto-canary") {
+    const isCanary = settings.githubCanary !== false && settings.canaryEnabled !== false && Math.random() < 0.05;
+    activeModelStr = isCanary ? "github-experimental" : "github-stable";
+    if (isCanary) {
+      log.info("ROUTING", "Canary routing active: routing to github-experimental");
+    }
+  }
+
+  const comboModels = await getComboModels(activeModelStr);
   if (comboModels) {
     // Check for combo-specific strategy first, fallback to global
     const comboStrategies = settings.comboStrategies || {};
-    const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
-    const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
+    const comboSpecificStrategy = comboStrategies[activeModelStr]?.fallbackStrategy;
+    let comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
+    
+    if (modelStr.includes("github/auto") || modelStr.includes("gh/auto") || activeModelStr.startsWith("github-")) {
+      comboStrategy = "score";
+    }
     
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
-    log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
+    log.info("CHAT", `Combo "${activeModelStr}" with ${comboModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
       models: comboModels,
       handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
       log,
-      comboName: modelStr,
+      comboName: activeModelStr,
       comboStrategy,
-      comboStickyLimit
+      comboStickyLimit,
+      headers: request?.headers
     });
   }
 
@@ -128,7 +145,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       // Check for combo-specific strategy first, fallback to global
       const comboStrategies = chatSettings.comboStrategies || {};
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
-      const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
+      let comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
+      
+      if (modelStr.includes("github/auto") || modelStr.includes("gh/auto") || modelStr.startsWith("github-")) {
+        comboStrategy = "score";
+      }
       
       const comboStickyLimit = chatSettings.comboStickyRoundRobinLimit;
       log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
@@ -139,7 +160,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         log,
         comboName: modelStr,
         comboStrategy,
-        comboStickyLimit
+        comboStickyLimit,
+        headers: request?.headers
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
@@ -147,6 +169,21 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
+
+  // Filter unsupported models for Responses API requests
+  const pathname = request?.url ? new URL(request.url).pathname : "";
+  const isResponsesApi = pathname.includes("/v1/responses") || pathname.endsWith("/responses");
+  if (isResponsesApi && provider === "github") {
+    const m = (model || "").toLowerCase();
+    const supportsResponses = !(m.includes("gemini") || m.includes("claude"));
+    if (!supportsResponses) {
+      log.warn("CHAT", `Model ${provider}/${model} does not support Responses API`);
+      return new Response(
+        JSON.stringify({ error: { message: `Model ${provider}/${model} does not support Responses API` } }),
+        { status: HTTP_STATUS.BAD_REQUEST, headers: { "Content-Type": "application/json" } }
+      );
+    }
+  }
 
   // Log model routing (alias → actual model)
   if (modelStr !== `${provider}/${model}`) {
@@ -163,8 +200,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastError = null;
   let lastStatus = null;
 
+  const requestStartTime = Date.now();
+
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
+      headers: request?.headers
+    });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -225,6 +266,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
+        if (provider === "github") {
+          const { checkPromotionDemotion } = await import("open-sse/services/combo.js");
+          checkPromotionDemotion(`${provider}/${model}`, true, Date.now() - requestStartTime).catch(() => {});
+        }
       }
     });
 
@@ -232,6 +277,19 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+
+    if (provider === "github") {
+      const { saveRequestUsage } = await import("@/lib/usageDb.js");
+      const { checkPromotionDemotion } = await import("open-sse/services/combo.js");
+      saveRequestUsage({
+        provider,
+        model,
+        connectionId: credentials.connectionId,
+        tokens: { prompt_tokens: 0, completion_tokens: 0 },
+        status: "error"
+      }).catch(() => {});
+      checkPromotionDemotion(`${provider}/${model}`, false, Date.now() - requestStartTime).catch(() => {});
+    }
 
     if (shouldFallback) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);

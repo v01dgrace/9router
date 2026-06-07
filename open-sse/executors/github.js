@@ -170,7 +170,20 @@ export class GithubExecutor extends BaseExecutor {
   }
 
   async execute(options) {
-    const { model, log } = options;
+    const { model, log, credentials } = options;
+
+    // Check cached capabilities first to see if model only supports /responses
+    if (credentials?.availableModels) {
+      const cleanModel = model.startsWith("github/") ? model.slice(7) : model;
+      const cachedModel = credentials.availableModels.find(m => m.id === cleanModel || m.id === model);
+      if (cachedModel) {
+        const endpoints = cachedModel.supported_endpoints || cachedModel.capabilities?.supported_endpoints || [];
+        if (endpoints.includes("/responses") && !endpoints.includes("/chat/completions") && this.supportsResponsesEndpoint(model)) {
+          log?.debug("GITHUB", `Model ${model} only supports /responses according to cached capabilities. Routing directly.`);
+          this.knownCodexModels.add(model);
+        }
+      }
+    }
 
     // Only use /responses for models that are explicitly known to need it (e.g. gpt codex models)
     // and that the /responses endpoint actually serves (excludes Gemini/Claude, see #1062).

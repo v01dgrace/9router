@@ -283,4 +283,77 @@ export async function runMigrationOnce(adapter) {
     try { backupFile(DATA_FILE, backupDir); } catch {}
     pruneOldBackups();
   }
+
+  // Seed default GitHub combos if they don't exist, or update them to match new default configurations
+  try {
+    const combosToSeed = [
+      {
+        name: "github-stable",
+        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gemini-3.5-flash", "github/gpt-4o-mini"]
+      },
+      {
+        name: "github-experimental",
+        models: ["github/gpt-5.4", "github/gpt-5.5", "github/claude-opus-4.8", "github/gemini-3.5-flash", "github/claude-sonnet-4.6"]
+      },
+      {
+        name: "github-fast",
+        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/gemini-3.5-flash"]
+      },
+      {
+        name: "github-coding",
+        models: ["github/claude-sonnet-4.6", "github/gpt-5.4", "github/gpt-4o"]
+      },
+      {
+        name: "github-agent",
+        models: ["github/gpt-5.3-codex", "github/gpt-5.2-codex", "github/gpt-4o", "github/claude-sonnet-4.6"]
+      },
+      {
+        name: "github-reasoning",
+        models: ["github/claude-opus-4.8", "github/gpt-5.5", "github/gemini-3.1-pro-preview"]
+      },
+      {
+        name: "github-canary",
+        models: [
+          "github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gemini-3.5-flash", "github/gpt-4o-mini",
+          "github/gpt-5.4", "github/gpt-5.5", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"
+        ]
+      }
+    ];
+
+    for (const item of combosToSeed) {
+      const exists = adapter.get("SELECT COUNT(*) as c FROM combos WHERE name = ?", [item.name])?.c > 0;
+      const now = new Date().toISOString();
+      if (!exists) {
+        const id = `combo-${item.name.replace("github-", "")}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        adapter.run(
+          "INSERT INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)",
+          [id, item.name, null, JSON.stringify(item.models), now, now]
+        );
+        console.log(`[DB] Seeded combo ${item.name}`);
+      } else {
+        adapter.run(
+          "UPDATE combos SET models = ?, updatedAt = ? WHERE name = ?",
+          [JSON.stringify(item.models), now, item.name]
+        );
+        console.log(`[DB] Updated combo ${item.name} with new default model list`);
+      }
+    }
+  } catch (err) {
+    console.warn("[DB] Failed to seed/update default combos:", err.message);
+  }
+
+  // Trigger NIM auto-discovery on fresh DB (first-time setup)
+  // For existing DB, autoRefreshIfDue checks the 12h interval
+  try {
+    const { autoRefreshIfDue } = await import("open-sse/services/nvidiaDiscovery.js");
+    autoRefreshIfDue().then((result) => {
+      if (result && !result.skipped) {
+        console.log("[NIM] Auto-refresh completed on startup:", JSON.stringify(result));
+      }
+    }).catch((err) => {
+      console.warn("[NIM] Auto-refresh failed on startup:", err.message);
+    });
+  } catch (err) {
+    console.warn("[NIM] Discovery service not available:", err.message);
+  }
 }

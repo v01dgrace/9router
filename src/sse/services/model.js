@@ -28,6 +28,25 @@ export async function resolveModelAlias(alias) {
  * Get full model info (parse or resolve)
  */
 export async function getModelInfo(modelStr) {
+  if (modelStr === "github/auto" || modelStr === "gh/auto") {
+    return { provider: null, model: "github-stable" };
+  }
+  if (modelStr === "github/auto-fast" || modelStr === "gh/auto-fast") {
+    return { provider: null, model: "github-fast" };
+  }
+  if (modelStr === "github/auto-coding" || modelStr === "gh/auto-coding") {
+    return { provider: null, model: "github-coding" };
+  }
+  if (modelStr === "github/auto-agent" || modelStr === "gh/auto-agent") {
+    return { provider: null, model: "github-agent" };
+  }
+  if (modelStr === "github/auto-reasoning" || modelStr === "gh/auto-reasoning") {
+    return { provider: null, model: "github-reasoning" };
+  }
+  if (modelStr === "github/auto-canary" || modelStr === "gh/auto-canary") {
+    return { provider: null, model: "github-canary" };
+  }
+
   const parsed = parseModel(modelStr);
 
   if (!parsed.isAlias) {
@@ -72,6 +91,53 @@ export async function getModelInfo(modelStr) {
  * @returns {Promise<string[]|null>} Array of models or null if not a combo
  */
 export async function getComboModels(modelStr) {
+  if (modelStr === "github/auto" || modelStr === "gh/auto") {
+    const combo = await getComboByName("github-stable");
+    return combo?.models || null;
+  }
+  if (modelStr === "github/auto-fast" || modelStr === "gh/auto-fast") {
+    const combo = await getComboByName("github-fast");
+    return combo?.models || null;
+  }
+  if (modelStr === "github/auto-coding" || modelStr === "gh/auto-coding") {
+    const combo = await getComboByName("github-coding");
+    return combo?.models || null;
+  }
+  if (modelStr === "github/auto-agent" || modelStr === "gh/auto-agent") {
+    const combo = await getComboByName("github-agent");
+    return combo?.models || null;
+  }
+  if (modelStr === "github/auto-reasoning" || modelStr === "gh/auto-reasoning") {
+    const combo = await getComboByName("github-reasoning");
+    return combo?.models || null;
+  }
+  if (modelStr === "github/auto-canary" || modelStr === "gh/auto-canary") {
+    const combo = await getComboByName("github-canary");
+    return combo?.models || null;
+  }
+
+  // NVIDIA NIM auto combos (dynamically seeded from provider_models)
+  if (modelStr === "nvidia/auto" || modelStr === "nim/auto") {
+    const combo = await getComboByName("nim-general");
+    return combo?.models || null;
+  }
+  if (modelStr === "nvidia/auto-coding" || modelStr === "nim/auto-coding") {
+    const combo = await getComboByName("nim-coding");
+    return combo?.models || null;
+  }
+  if (modelStr === "nvidia/auto-fast" || modelStr === "nim/auto-fast") {
+    const combo = await getComboByName("nim-fast");
+    return combo?.models || null;
+  }
+  if (modelStr === "nvidia/auto-agent" || modelStr === "nim/auto-agent") {
+    const combo = await getComboByName("nim-agent");
+    return combo?.models || null;
+  }
+  if (modelStr === "nvidia/auto-reasoning" || modelStr === "nim/auto-reasoning") {
+    const combo = await getComboByName("nim-reasoning");
+    return combo?.models || null;
+  }
+
   // Only check if it's not in provider/model format
   if (modelStr.includes("/")) return null;
 
