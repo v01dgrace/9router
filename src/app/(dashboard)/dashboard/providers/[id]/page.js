@@ -63,7 +63,7 @@ export default function ProviderDetailPage() {
   const [oneByOneResults, setOneByOneResults] = useState({});
   const [oneByOneSummary, setOneByOneSummary] = useState(null);
   const stopOneByOneRef = useRef(false);
-  const [importingQoderModels, setImportingQoderModels] = useState(false);
+  const [importingModels, setImportingModels] = useState(false);
   const { copied, copy } = useCopyToClipboard();
 
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
@@ -411,16 +411,16 @@ export default function ProviderDetailPage() {
     }
   };
 
-  // Fetch Qoder model list and automatically add to available models
-  const handleImportQoderModels = async () => {
-    if (importingQoderModels) return;
+  // Fetch model list and automatically add to available models
+  const handleImportModels = async () => {
+    if (importingModels) return;
     const activeConnection = connections.find((conn) => conn.isActive !== false);
     if (!activeConnection) {
-      alert(translate("Please add an active Qoder connection first"));
+      alert(translate("Please add an active connection first"));
       return;
     }
 
-    setImportingQoderModels(true);
+    setImportingModels(true);
     try {
       const res = await fetch(`/api/providers/${activeConnection.id}/models`);
       const data = await res.json();
@@ -439,18 +439,13 @@ export default function ProviderDetailPage() {
         const modelId = model.id || model.name;
         if (!modelId) continue;
         
-        // Qoder model ID format may be "qoder/auto" or "auto", need to remove prefix
-        const cleanModelId = modelId.replace(/^qoder\//, "");
+        // Remove provider prefix if present (e.g. "nvidia/qwen/..." or "qoder/...")
+        const cleanModelId = modelId.replace(new RegExp(`^${providerId}/`), "");
         const fullModel = `${providerStorageAlias}/${cleanModelId}`;
-        
-        // Check if already exists
-        if (Object.values(modelAliases).includes(fullModel)) {
-          continue;
-        }
         
         // Use model ID as alias
         const alias = cleanModelId;
-        if (modelAliases[alias]) {
+        if (Object.values(modelAliases).includes(fullModel) || modelAliases[alias]) {
           continue;
         }
         
@@ -458,16 +453,56 @@ export default function ProviderDetailPage() {
         importedCount += 1;
       }
       
+      // Check for unavailable models (present in aliases but not in fetched list)
+      const fetchedModelIds = new Set(models.map(m => m.id || m.name));
+      const prefix = `${providerStorageAlias}/`;
+      const existingFullModels = Object.values(modelAliases).filter(m => m.startsWith(prefix));
+      const unavailableModels = [];
+
+      for (const fullModel of existingFullModels) {
+        const modelId = fullModel.slice(prefix.length);
+        const cleanFetchedId = modelId.replace(new RegExp(`^${providerId}/`), "");
+        if (!fetchedModelIds.has(modelId) && !fetchedModelIds.has(cleanFetchedId)) {
+          const aliasesForModel = Object.entries(modelAliases)
+            .filter(([, val]) => val === fullModel)
+            .map(([alias]) => alias);
+          if (aliasesForModel.length > 0) {
+            unavailableModels.push({ modelId, aliases: aliasesForModel });
+          }
+        }
+      }
+
       if (importedCount === 0) {
-        alert(translate("All models already exist, no new models added"));
+        if (unavailableModels.length === 0) {
+          alert(translate("All models already exist, no new models added"));
+        }
       } else {
         alert(translate("Successfully added") + ` ${importedCount} ` + translate("models"));
       }
+
+      if (unavailableModels.length > 0) {
+        const listStr = unavailableModels.map(m => `• ${m.modelId} (alias: ${m.aliases.join(", ")})`).join("\n");
+        setTimeout(() => {
+          setConfirmState({
+            title: translate("Clean Up Unavailable Models"),
+            message: `${translate("The following models are no longer available on the provider's API. Do you want to delete their aliases?")}\n\n${listStr}`,
+            onConfirm: async () => {
+              setConfirmState(null);
+              for (const item of unavailableModels) {
+                for (const alias of item.aliases) {
+                  await handleDeleteAlias(alias);
+                }
+              }
+              alert(translate("Successfully cleaned up unavailable models"));
+            }
+          });
+        }, 100);
+      }
     } catch (error) {
-      console.log("Error importing Qoder models:", error);
+      console.log("Error importing models:", error);
       alert(translate("Error fetching models") + ": " + error.message);
     } finally {
-      setImportingQoderModels(false);
+      setImportingModels(false);
     }
   };
 
@@ -988,17 +1023,17 @@ export default function ProviderDetailPage() {
           Add Model
         </button>
 
-        {/* Import Qoder models button — only show for qoder provider */}
-        {providerId === "qoder" && connections.some((conn) => conn.isActive !== false) && (
+        {/* Import models button — show for any provider with active connection */}
+        {connections.some((conn) => conn.isActive !== false) && (
           <button
-            onClick={handleImportQoderModels}
-            disabled={importingQoderModels}
+            onClick={handleImportModels}
+            disabled={importingModels}
             className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <span className="material-symbols-outlined text-sm" style={importingQoderModels ? { animation: "spin 1s linear infinite" } : undefined}>
-              {importingQoderModels ? "progress_activity" : "download"}
+            <span className="material-symbols-outlined text-sm" style={importingModels ? { animation: "spin 1s linear infinite" } : undefined}>
+              {importingModels ? "progress_activity" : "download"}
             </span>
-            {importingQoderModels ? translate("Fetching...") : translate("Fetch Qoder Models")}
+            {importingModels ? translate("Fetching...") : translate("Fetch Models")}
           </button>
         )}
 

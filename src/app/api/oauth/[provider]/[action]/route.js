@@ -306,6 +306,17 @@ export async function POST(request, { params }) {
           testStatus: "active",
         });
 
+        if (provider === "github") {
+          try {
+            // Dynamic import to prevent circular dependency between route handlers, 
+            // SSE auth services, and localDb database repositories on startup.
+            const { fetchAndStoreGithubModels } = await import("@/sse/services/auth.js");
+            await fetchAndStoreGithubModels(connection);
+          } catch (err) {
+            console.error("Failed to run initial model discovery for GitHub:", err);
+          }
+        }
+
         return NextResponse.json({ 
           success: true, 
           connection: {
