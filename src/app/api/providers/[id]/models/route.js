@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { getProviderConnectionById } from "@/models";
+import { getProviderConnectionById, updateProviderConnection } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { GEMINI_CONFIG } from "@/lib/oauth/constants/oauth";
-import { refreshGoogleToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
+import { refreshGoogleToken, updateProviderCredentials, checkAndRefreshToken } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
@@ -221,13 +221,24 @@ const PROVIDER_MODELS_CONFIG = {
       return data.data
         .filter(m => m.capabilities?.type === "chat")
         .filter(m => m.policy?.state !== "disabled") // Only return explicitly enabled models
-        .map(m => ({
-          id: m.id,
-          name: m.name || m.id,
-          version: m.version,
-          capabilities: m.capabilities,
-          isDefault: m.model_picker_enabled === true
-        }));
+        .map(m => {
+          const endpoints = m.supported_endpoints || m.capabilities?.supported_endpoints || [];
+          return {
+            id: m.id,
+            name: m.name || m.id,
+            version: m.version,
+            capabilityVersion: 1,
+            endpoints: {
+              chatCompletions: endpoints.includes("/chat/completions") || !endpoints.includes("/responses"),
+              responses: endpoints.includes("/responses") || m.id.includes("codex") || m.id.includes("gpt-5.3")
+            },
+            features: {
+              tools: !!(m.capabilities?.tools === true || m.capabilities?.limits?.tools === true),
+              vision: !!(m.capabilities?.vision === true)
+            },
+            isDefault: m.model_picker_enabled === true
+          };
+        });
     }
   },
   openai: createOpenAIModelsConfig("https://api.openai.com/v1/models"),
@@ -280,6 +291,8 @@ const PROVIDER_MODELS_CONFIG = {
   nanobanana: createOpenAIModelsConfig("https://api.nanobananaapi.ai/v1/models"),
   chutes: createOpenAIModelsConfig("https://llm.chutes.ai/v1/models"),
   nvidia: createOpenAIModelsConfig("https://integrate.api.nvidia.com/v1/models"),
+  opencode: createOpenAIModelsConfig("https://opencode.ai/zen/v1/models"),
+  "opencode-go": createOpenAIModelsConfig("https://opencode.ai/zen/go/v1/models"),
   assemblyai: createOpenAIModelsConfig("https://api.assemblyai.com/v1/models"),
   "vercel-ai-gateway": createOpenAIModelsConfig("https://ai-gateway.vercel.sh/v1/models"),
 
@@ -408,10 +421,14 @@ const PROVIDER_MODELS_CONFIG = {
 export async function GET(request, { params }) {
   try {
     const { id } = await params;
-    const connection = await getProviderConnectionById(id);
+    let connection = await getProviderConnectionById(id);
 
     if (!connection) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
+    }
+
+    if (connection.provider === "github") {
+      connection = await checkAndRefreshToken("github", connection);
     }
 
     if (isOpenAICompatibleProvider(connection.provider)) {
@@ -632,6 +649,23 @@ export async function GET(request, { params }) {
                !id.includes("dall-e") &&
                !id.includes("moderation") &&
                !id.includes("edit");
+      });
+    }
+
+    // Save availableModels to the database
+    if (connection.provider === "github") {
+      const integrator = request.headers.get("copilot-integration-id") || "vscode-chat";
+      const availableModelsByIntegrator = connection.availableModelsByIntegrator || {};
+      availableModelsByIntegrator[integrator] = models;
+
+      const lastModelDiscoveryAt = connection.lastModelDiscoveryAt && typeof connection.lastModelDiscoveryAt === "object"
+        ? { ...connection.lastModelDiscoveryAt }
+        : {};
+      lastModelDiscoveryAt[integrator] = new Date().toISOString();
+
+      await updateProviderConnection(connection.id, {
+        availableModelsByIntegrator,
+        lastModelDiscoveryAt
       });
     }
 
