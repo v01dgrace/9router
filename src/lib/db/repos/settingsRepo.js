@@ -36,6 +36,8 @@ const DEFAULT_SETTINGS = {
   rtkEnabled: true,
   cavemanEnabled: false,
   cavemanLevel: "full",
+  githubCanary: true,
+  canaryEnabled: true,
 };
 
 async function readRaw() {
