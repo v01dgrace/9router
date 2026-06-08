@@ -71,6 +71,11 @@ export function getRotatedModels(models, comboName, strategy, stickyLimit = 1) {
 // In-memory cache for recent latencies: modelStr -> array of numbers
 const modelRecentLatencies = new Map();
 
+// Per-model EMA-smoothed latency (modelStr -> ms), used as fallback in sortModelsByScore
+// when connection-level averageLatency is unavailable
+const modelLatencyEMA = new Map();
+const LATENCY_EMA_ALPHA = 0.2; // smoothing factor for EMA
+
 // Map to store session affinity: sessionKey -> { modelStr, lastAccessAt }
 export const sessionModelLocks = new Map();
 const MAX_SESSION_LOCKS = 5000;
@@ -149,40 +154,128 @@ export const TASK_CAPABILITY_SCORES = {
   coding: {
     "claude-3.5-sonnet": 1.0,
     "claude-sonnet-4.6": 1.0,
-    "gpt-4o": 0.9,
+    "gpt-5.5": 0.95,
+    "gpt-5.4": 0.95,
+    "claude-opus-4.8": 0.95,
+    "claude-opus-4.7": 0.95,
+    "claude-opus-4.6": 0.95,
+    "gpt-5.2": 0.9,
     "gpt-4.1": 0.9,
+    "claude-sonnet-4.5": 0.9,
+    "claude-opus-4.5": 0.85,
     "gpt-5-mini": 0.8,
+    "gpt-5.4-mini": 0.8,
+    "gemini-3.1-pro-preview": 0.8,
+    "claude-sonnet-4": 0.8,
+    "grok-code-fast-1": 0.8,
+    "gpt-4o": 0.75,
+    "gemini-2.5-pro": 0.75,
     "gpt-4o-mini": 0.7,
+    "gemini-3-flash-preview": 0.7,
     "claude-haiku-4.5": 0.6,
-    "gemini-3.5-flash": 0.7
+    "oswe-vscode-prime": 0.5,
+    "goldeneye-free-auto": 0.5,
+    "gpt-4": 0.4,
+    "gpt-3.5-turbo": 0.2
   },
   reasoning: {
     "claude-3.5-opus": 1.0,
     "claude-opus-4.8": 1.0,
     "gpt-5.5": 0.95,
     "gpt-5.4": 0.95,
-    "gemini-3.5-flash": 0.7
+    "claude-opus-4.7": 0.95,
+    "claude-opus-4.6": 0.95,
+    "claude-opus-4.5": 0.9,
+    "gemini-3.1-pro-preview": 0.85,
+    "claude-sonnet-4.5": 0.85,
+    "gpt-5.2": 0.8,
+    "gemini-2.5-pro": 0.8,
+    "claude-sonnet-4": 0.75,
+    "gpt-5.4-mini": 0.7,
+    "gemini-3-flash-preview": 0.65,
+    "claude-haiku-4.5": 0.4,
+    "gpt-4": 0.35,
+    "gpt-4o": 0.5,
+    "gpt-3.5-turbo": 0.1
   },
   fast: {
     "gpt-5-mini": 1.0,
     "gpt-4o-mini": 0.9,
+    "gpt-5.4-mini": 0.9,
+    "gpt-5.2": 0.8,
     "claude-haiku-4.5": 0.8,
-    "gemini-3.5-flash": 0.8,
-    "gpt-4o": 0.6
+    "gemini-3-flash-preview": 0.8,
+    "grok-code-fast-1": 0.7,
+    "gpt-5.4": 0.7,
+    "claude-sonnet-4.6": 0.65,
+    "claude-sonnet-4.5": 0.6,
+    "gpt-5.5": 0.6,
+    "gpt-4o": 0.6,
+    "claude-sonnet-4": 0.6,
+    "gemini-3.1-pro-preview": 0.5,
+    "gemini-2.5-pro": 0.5,
+    "oswe-vscode-prime": 0.5,
+    "goldeneye-free-auto": 0.5,
+    "gpt-4.1": 0.45,
+    "gpt-4": 0.3,
+    "claude-opus-4.8": 0.3,
+    "claude-opus-4.7": 0.3,
+    "claude-opus-4.6": 0.3,
+    "claude-opus-4.5": 0.3,
+    "gpt-3.5-turbo": 0.3
   },
   agent: {
     "gpt-5.3-codex": 1.0,
     "gpt-5.2-codex": 0.95,
-    "gpt-4o": 0.8,
-    "claude-sonnet-4.6": 0.9
+    "claude-sonnet-4.6": 0.9,
+    "gpt-5.4": 0.9,
+    "gpt-5.2": 0.9,
+    "gpt-5.5": 0.9,
+    "claude-opus-4.8": 0.85,
+    "claude-opus-4.7": 0.85,
+    "claude-opus-4.6": 0.85,
+    "claude-sonnet-4.5": 0.8,
+    "claude-opus-4.5": 0.8,
+    "gpt-5.4-mini": 0.75,
+    "gemini-3.1-pro-preview": 0.75,
+    "gpt-4o": 0.7,
+    "claude-sonnet-4": 0.7,
+    "gemini-2.5-pro": 0.7,
+    "grok-code-fast-1": 0.7,
+    "gpt-4.1": 0.65,
+    "gemini-3-flash-preview": 0.65,
+    "claude-haiku-4.5": 0.5,
+    "oswe-vscode-prime": 0.5,
+    "goldeneye-free-auto": 0.5,
+    "gpt-4": 0.4,
+    "gpt-4o-mini": 0.4,
+    "gpt-3.5-turbo": 0.2
   },
   general: {
     "claude-sonnet-4.6": 1.0,
-    "gpt-4o": 0.9,
+    "gpt-5.5": 0.9,
+    "gpt-5.4": 0.9,
+    "claude-opus-4.8": 0.9,
+    "claude-opus-4.7": 0.9,
+    "claude-opus-4.6": 0.9,
+    "gpt-5.2": 0.85,
     "gpt-4.1": 0.85,
+    "claude-sonnet-4.5": 0.85,
+    "claude-opus-4.5": 0.85,
     "gpt-5-mini": 0.8,
+    "gpt-5.4-mini": 0.8,
+    "gemini-3.1-pro-preview": 0.8,
+    "claude-sonnet-4": 0.8,
+    "gpt-4o": 0.75,
+    "gemini-2.5-pro": 0.75,
     "gpt-4o-mini": 0.7,
-    "claude-haiku-4.5": 0.7
+    "grok-code-fast-1": 0.7,
+    "claude-haiku-4.5": 0.7,
+    "gemini-3-flash-preview": 0.7,
+    "oswe-vscode-prime": 0.5,
+    "goldeneye-free-auto": 0.5,
+    "gpt-4": 0.4,
+    "gpt-3.5-turbo": 0.3
   }
 };
 
@@ -198,8 +291,11 @@ export function getCapabilityScore(taskClass, modelId) {
   const cleanModel = (modelId || "").toLowerCase();
   const taskScores = TASK_CAPABILITY_SCORES[taskClass] || TASK_CAPABILITY_SCORES.general;
 
-  for (const [key, val] of Object.entries(taskScores)) {
-    if (cleanModel.includes(key)) return val;
+  // Sort by key length descending so longer (more specific) keys match first
+  // e.g. "gpt-4o-mini" must match before "gpt-4o"
+  const sortedKeys = Object.keys(taskScores).sort((a, b) => b.length - a.length);
+  for (const key of sortedKeys) {
+    if (cleanModel.includes(key)) return taskScores[key];
   }
 
   // NIM model capability from category alignment (Phase 3 auto-categorization)
@@ -300,7 +396,7 @@ async function sortModelsByScore(models, taskClass = "general", activeLockModel 
               }
             }
 
-            const avgLatency = conn.averageLatency || 1000;
+            const avgLatency = conn.averageLatency || modelLatencyEMA.get(modelStr) || 1000;
             latencyScore = 1.0 - Math.min(avgLatency / 5000, 1.0);
 
             const priority = conn.priority || 5;
@@ -334,9 +430,21 @@ async function sortModelsByScore(models, taskClass = "general", activeLockModel 
 
   scoredModels.sort((a, b) => b.score - a.score);
 
+  // Filter models below minimum score threshold (gracefully degrade if all filtered)
+  const MIN_SCORE_THRESHOLD = 15;
+  const qualifiedModels = scoredModels.filter((item) => item.score >= MIN_SCORE_THRESHOLD);
+  const finalModels = qualifiedModels.length > 0 ? qualifiedModels : scoredModels;
+
+  if (qualifiedModels.length < scoredModels.length) {
+    const excludedModels = scoredModels
+      .filter((item) => item.score < MIN_SCORE_THRESHOLD)
+      .map((item) => `${item.modelStr}=${Math.round(item.score)}`);
+    console.warn(`[COMBO] Excluded ${excludedModels.length} low-scoring model(s) from ${taskClass} combo: ${excludedModels.join(", ")} (below threshold ${MIN_SCORE_THRESHOLD})`);
+  }
+
   return {
-    sortedModels: scoredModels.map((item) => item.modelStr),
-    explanationMap: Object.fromEntries(scoredModels.map(item => [item.modelStr, {
+    sortedModels: finalModels.map((item) => item.modelStr),
+    explanationMap: Object.fromEntries(finalModels.map(item => [item.modelStr, {
       selectedModel: item.modelStr,
       taskClass,
       availability: Math.round(item.details.availability * 100) / 100,
@@ -445,6 +553,17 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Success (2xx) - return response
       if (result.ok) {
         log.info("COMBO", `Model ${modelStr} succeeded`);
+
+        // Track per-model latency EMA for scoring
+        const latencyHeader = result.headers.get("x-upstream-latency-ms");
+        const latencyMs = latencyHeader ? Number(latencyHeader) : null;
+        if (typeof latencyMs === "number" && latencyMs > 0) {
+          const prev = modelLatencyEMA.get(modelStr);
+          const ema = prev != null
+            ? prev * (1 - LATENCY_EMA_ALPHA) + latencyMs * LATENCY_EMA_ALPHA
+            : latencyMs;
+          modelLatencyEMA.set(modelStr, ema);
+        }
 
         // Track NIM model health on success
         if (modelStr.startsWith("nvidia/")) {
