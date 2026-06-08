@@ -289,33 +289,33 @@ export async function runMigrationOnce(adapter) {
     const combosToSeed = [
       {
         name: "github-stable",
-        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gemini-3.5-flash", "github/gpt-4o-mini"]
+        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gpt-4o-mini", "github/gpt-4.1"]
       },
       {
         name: "github-experimental",
-        models: ["github/gpt-5.4", "github/gpt-5.5", "github/claude-opus-4.8", "github/gemini-3.5-flash", "github/claude-sonnet-4.6"]
+        models: ["github/gpt-5.5", "github/gpt-5.4", "github/gpt-5.3-codex", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"]
       },
       {
         name: "github-fast",
-        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/gemini-3.5-flash"]
+        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/gpt-4o-mini"]
       },
       {
         name: "github-coding",
-        models: ["github/claude-sonnet-4.6", "github/gpt-5.4", "github/gpt-4o"]
+        models: ["github/claude-sonnet-4.6", "github/gpt-5.4", "github/gpt-5.4-mini"]
       },
       {
         name: "github-agent",
-        models: ["github/gpt-5.3-codex", "github/gpt-5.2-codex", "github/gpt-4o", "github/claude-sonnet-4.6"]
+        models: ["github/gpt-5.3-codex", "github/gpt-5.2-codex", "github/claude-sonnet-4.6", "github/gpt-4o"]
       },
       {
         name: "github-reasoning",
-        models: ["github/claude-opus-4.8", "github/gpt-5.5", "github/gemini-3.1-pro-preview"]
+        models: ["github/gpt-5.5", "github/gpt-5.4", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"]
       },
       {
         name: "github-canary",
         models: [
-          "github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gemini-3.5-flash", "github/gpt-4o-mini",
-          "github/gpt-5.4", "github/gpt-5.5", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"
+          "github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gpt-4o-mini", "github/gpt-4.1",
+          "github/gpt-5.5", "github/gpt-5.4", "github/gpt-5.3-codex", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"
         ]
       }
     ];
