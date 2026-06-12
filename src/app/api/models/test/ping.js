@@ -149,7 +149,25 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
 
   if (!res.ok) {
     const detail = parsed?.error?.message || parsed?.msg || parsed?.message || parsed?.error || rawText;
-    return { ok: false, latencyMs, error: `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 240)}` : ""}`, status: res.status };
+    let errorMessage = `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 240)}` : ""}`;
+    
+    // Smart diagnostics for common failures
+    if (res.status === 404 || res.status === 405) {
+      const suffix = detail ? ` (${String(detail).slice(0, 100)})` : "";
+      if (model.startsWith("gemini/")) {
+        errorMessage = `HTTP ${res.status}: Model may not support Chat (GenerateContent)${suffix}. Check if it is an embedding or legacy model.`;
+      } else {
+        errorMessage = `HTTP ${res.status}: Model not found or Chat/Completions method not supported${suffix}.`;
+      }
+    } else if (res.status === 429) {
+      errorMessage = "HTTP 429: Rate limit exceeded or quota exhausted.";
+    } else if (res.status === 401 || res.status === 403) {
+      errorMessage = `HTTP ${res.status}: Invalid API Key or insufficient permissions.`;
+    } else if (String(detail).includes("safety")) {
+      errorMessage = "Provider rejected request due to safety filters.";
+    }
+
+    return { ok: false, latencyMs, error: errorMessage, status: res.status };
   }
 
   const providerStatus = parsed?.status;
@@ -159,21 +177,27 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     && String(providerStatus) !== "200"
     && String(providerStatus) !== "0";
   if (hasProviderErrorStatus && providerMsg) {
+    let errorMessage = `Provider status ${providerStatus}: ${String(providerMsg).slice(0, 240)}`;
+    if (String(providerStatus) === "429") errorMessage = "Provider reported: Rate limit exceeded.";
+    
     return {
       ok: false,
       latencyMs,
       status: res.status,
-      error: `Provider status ${providerStatus}: ${String(providerMsg).slice(0, 240)}`,
+      error: errorMessage,
     };
   }
 
   if (parsed?.error) {
     const providerError = parsed?.error?.message || parsed?.error || "Provider returned an error";
+    let errorMessage = String(providerError).slice(0, 240);
+    if (errorMessage.includes("safety")) errorMessage = "Safety filter rejected the test prompt.";
+    
     return {
       ok: false,
       latencyMs,
       status: res.status,
-      error: String(providerError).slice(0, 240),
+      error: errorMessage,
     };
   }
 

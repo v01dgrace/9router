@@ -17,6 +17,21 @@ const parseOpenAIStyleModels = (data) => {
 const parseGeminiCliModels = (data) => {
   if (Array.isArray(data?.models)) {
     return data.models
+      .filter((item) => {
+        const id = (item?.id || item?.model || item?.name || "").toLowerCase();
+        const supportsChat = Array.isArray(item?.supportedGenerationMethods) &&
+                             item.supportedGenerationMethods.includes("generateContent");
+        const isNotSpecialized = !id.includes("embedding") &&
+                                 !id.includes("image") &&
+                                 !id.includes("audio") &&
+                                 !id.includes("video") &&
+                                 !id.includes("rerank") &&
+                                 !id.includes("tts") &&
+                                 !id.includes("whisper");
+        // For internal CLI models, if supportedGenerationMethods is missing, we assume it's a chat model
+        // but still apply the keyword filter.
+        return (item?.supportedGenerationMethods ? supportsChat : true) && isNotSpecialized;
+      })
       .map((item) => {
         const id = item?.id || item?.model || item?.name;
         if (!id) return null;
@@ -27,7 +42,18 @@ const parseGeminiCliModels = (data) => {
 
   if (data?.models && typeof data.models === "object") {
     return Object.entries(data.models)
-      .filter(([, info]) => !info?.isInternal)
+      .filter(([id, info]) => {
+        if (info?.isInternal) return false;
+        const lowId = id.toLowerCase();
+        const isNotSpecialized = !lowId.includes("embedding") &&
+                                 !lowId.includes("image") &&
+                                 !lowId.includes("audio") &&
+                                 !lowId.includes("video") &&
+                                 !lowId.includes("rerank") &&
+                                 !lowId.includes("tts") &&
+                                 !lowId.includes("whisper");
+        return isNotSpecialized;
+      })
       .map(([id, info]) => ({
         id,
         name: info?.displayName || info?.name || id,
@@ -135,7 +161,22 @@ const PROVIDER_MODELS_CONFIG = {
     method: "GET",
     headers: { "Content-Type": "application/json" },
     authQuery: "key", // Use query param for API key
-    parseResponse: (data) => data.models || []
+    parseResponse: (data) => {
+      const all = data.models || [];
+      return all.filter(m => {
+        const id = (m.id || m.name || "").toLowerCase();
+        const supportsChat = Array.isArray(m.supportedGenerationMethods) &&
+                             m.supportedGenerationMethods.includes("generateContent");
+        const isNotSpecialized = !id.includes("embedding") &&
+                                 !id.includes("image") &&
+                                 !id.includes("audio") &&
+                                 !id.includes("video") &&
+                                 !id.includes("rerank") &&
+                                 !id.includes("tts") &&
+                                 !id.includes("whisper");
+        return supportsChat && isNotSpecialized;
+      });
+    }
   },
   qwen: {
     url: "https://portal.qwen.ai/v1/models",
@@ -414,7 +455,20 @@ export async function GET(request, { params }) {
       }
 
       const data = await response.json();
-      const models = data.data || data.models || [];
+      const allModels = data.data || data.models || [];
+      const models = allModels.filter(m => {
+        const id = (m.id || m.name || "").toLowerCase();
+        return !id.includes("embedding") &&
+               !id.includes("image") &&
+               !id.includes("audio") &&
+               !id.includes("video") &&
+               !id.includes("rerank") &&
+               !id.includes("tts") &&
+               !id.includes("whisper") &&
+               !id.includes("dall-e") &&
+               !id.includes("moderation") &&
+               !id.includes("edit");
+      });
 
       return NextResponse.json({
         provider: connection.provider,
@@ -455,7 +509,20 @@ export async function GET(request, { params }) {
       }
 
       const data = await response.json();
-      const models = data.data || data.models || [];
+      const allModels = data.data || data.models || [];
+      const models = allModels.filter(m => {
+        const id = (m.id || m.name || "").toLowerCase();
+        return !id.includes("embedding") &&
+               !id.includes("image") &&
+               !id.includes("audio") &&
+               !id.includes("video") &&
+               !id.includes("rerank") &&
+               !id.includes("tts") &&
+               !id.includes("whisper") &&
+               !id.includes("dall-e") &&
+               !id.includes("moderation") &&
+               !id.includes("edit");
+      });
 
       return NextResponse.json({
         provider: connection.provider,
@@ -478,17 +545,36 @@ export async function GET(request, { params }) {
       if (result.error) {
         return NextResponse.json({ error: result.error }, { status: result.status || 500 });
       }
+      
+      // Apply filtering to custom resolver results (like ollama-local)
+      let filteredModels = result.models || [];
+      if (["ollama", "ollama-local", "kiro", "qoder", "gemini-cli"].includes(connection.provider)) {
+        filteredModels = filteredModels.filter(m => {
+          const id = (m.id || m.name || "").toLowerCase();
+          return !id.includes("embedding") &&
+                 !id.includes("image") &&
+                 !id.includes("audio") &&
+                 !id.includes("video") &&
+                 !id.includes("rerank") &&
+                 !id.includes("tts") &&
+                 !id.includes("whisper") &&
+                 !id.includes("dall-e") &&
+                 !id.includes("moderation") &&
+                 !id.includes("edit");
+        });
+      }
+
       return NextResponse.json({
         provider: connection.provider,
         connectionId: connection.id,
-        models: result.models,
+        models: filteredModels,
         ...(result.warning ? { warning: result.warning } : {})
       });
     }
 
     // Get auth token
     const token = connection.providerSpecificData?.copilotToken || connection.accessToken || connection.apiKey;
-    if (!token) {
+    if (!token && !config.authQuery && config.authHeader) {
       return NextResponse.json({ error: "No valid token found" }, { status: 401 });
     }
 
@@ -497,7 +583,7 @@ export async function GET(request, { params }) {
     if (connection.provider === "qwen") {
       url = resolveQwenModelsUrl(connection);
     }
-    if (config.authQuery) {
+    if (config.authQuery && token) {
       url += `?${config.authQuery}=${token}`;
     }
 
@@ -511,7 +597,7 @@ export async function GET(request, { params }) {
       }
     }
 
-    if (config.authHeader && !config.authQuery) {
+    if (config.authHeader && !config.authQuery && token) {
       headers[config.authHeader] = (config.authPrefix || "") + token;
     }
 
@@ -530,14 +616,41 @@ export async function GET(request, { params }) {
     if (!response.ok) {
       const errorText = await response.text();
       console.log(`Error fetching models from ${connection.provider}:`, errorText);
+      
+      let errorMessage = `Failed to fetch models: ${response.status}`;
+      if (response.status === 401 || response.status === 403) {
+        errorMessage = `HTTP ${response.status}: Invalid API Key or insufficient permissions. Please check your credentials.`;
+      } else if (response.status === 404 || response.status === 405) {
+        errorMessage = `HTTP ${response.status}: Model discovery endpoint not found or not supported by this provider.`;
+      } else if (response.status === 429) {
+        errorMessage = "HTTP 429: Rate limit exceeded while fetching models.";
+      }
+
       return NextResponse.json(
-        { error: `Failed to fetch models: ${response.status}` },
+        { error: errorMessage },
         { status: response.status }
       );
     }
 
     const data = await response.json();
-    const models = config.parseResponse(data);
+    let models = config.parseResponse(data);
+
+    // Filter out non-chat models for generic providers
+    if (["openai", "openrouter", "deepseek", "groq", "mistral", "together", "fireworks", "cerebras", "nebius", "siliconflow", "hyperbolic", "chutes", "nvidia"].includes(connection.provider)) {
+      models = models.filter(m => {
+        const id = (m.id || m.name || "").toLowerCase();
+        return !id.includes("embedding") &&
+               !id.includes("image") &&
+               !id.includes("audio") &&
+               !id.includes("video") &&
+               !id.includes("rerank") &&
+               !id.includes("tts") &&
+               !id.includes("whisper") &&
+               !id.includes("dall-e") &&
+               !id.includes("moderation") &&
+               !id.includes("edit");
+      });
+    }
 
     // Save availableModels to the database
     if (connection.provider === "github") {

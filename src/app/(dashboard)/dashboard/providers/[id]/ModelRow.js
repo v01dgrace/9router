@@ -1,6 +1,6 @@
 import PropTypes from "prop-types";
 
-export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable }) {
+export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, testError, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable }) {
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -16,12 +16,19 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
   return (
     <div className={`group min-w-0 max-w-full rounded-lg border px-3 py-2 ${borderColor} hover:bg-sidebar/50`}>
       <div className="flex min-w-0 items-start gap-2 sm:items-center">
-        <span
-          className="material-symbols-outlined shrink-0 text-base"
-          style={iconColor ? { color: iconColor } : undefined}
-        >
-          {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
-        </span>
+        <div className="relative shrink-0 group/icon">
+          <span
+            className="material-symbols-outlined text-base"
+            style={iconColor ? { color: iconColor } : undefined}
+          >
+            {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
+          </span>
+          {testStatus === "error" && testError && (
+            <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 rounded bg-red-500 text-[10px] text-white whitespace-nowrap opacity-0 group-hover/icon:opacity-100 transition-opacity z-50">
+              {testError}
+            </span>
+          )}
+        </div>
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <code className="max-w-[72vw] truncate rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-muted sm:max-w-[360px]">{fullModel}</code>
           {model.name && <span className="truncate pl-1 text-[9px] italic text-text-muted/70">{model.name}</span>}
@@ -86,6 +93,7 @@ ModelRow.propTypes = {
   copied: PropTypes.string,
   onCopy: PropTypes.func.isRequired,
   testStatus: PropTypes.oneOf(["ok", "error"]),
+  testError: PropTypes.string,
   isCustom: PropTypes.bool,
   isFree: PropTypes.bool,
   onDeleteAlias: PropTypes.func,
