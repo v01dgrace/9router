@@ -349,6 +349,17 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 export const providerFailures = new Map(); // providerId -> count
 export const providerCooldowns = new Map(); // providerId -> timestamp (cooldown expiration)
 
+export function isFatalModelError(status, errorText) {
+  const lowerError = String(errorText || "").toLowerCase();
+  return lowerError.includes("model_not_supported") ||
+    lowerError.includes("model_not_available_for_integrator") ||
+    lowerError.includes("model_not_found") ||
+    lowerError.includes("not accessible via the /chat/completions endpoint") ||
+    (status === 404 &&
+      lowerError.includes("function") &&
+      lowerError.includes("not found") &&
+      lowerError.includes("account"));
+}
 /**
  * Mark account+model as unavailable — locks modelLock_${model} in DB.
  * All errors (429, 401, 5xx, etc.) lock per model, not per account.
@@ -397,10 +408,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     connectionHealth = ConnectionHealth.QUOTA_EXHAUSTED;
     log.warn("AUTH", `Locking connection ${connectionId} for 24 hours due to quota exhaustion: ${reason}`);
   } else if (model) {
-    const isFatal = lowerError.includes("model_not_supported") || 
-                    lowerError.includes("model_not_available_for_integrator") ||
-                    lowerError.includes("model_not_found") ||
-                    lowerError.includes("not accessible via the /chat/completions endpoint");
+    const isFatal = isFatalModelError(status, reason);
 
     const modelRecord = modelHealth[model] || { failCount: 0 };
     modelRecord.failCount = (modelRecord.failCount || 0) + 1;
@@ -442,16 +450,22 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   const lockUpdate = buildModelLockUpdate(lockModel, cooldownForLock);
 
-  await updateProviderConnection(connectionId, {
-    ...lockUpdate,
-    modelHealth,
-    connectionHealth,
-    testStatus: "unavailable",
-    lastError: reason,
-    errorCode: status,
-    lastErrorAt: new Date().toISOString(),
-    backoffLevel: newBackoffLevel ?? backoffLevel
-  });
+  try {
+    await updateProviderConnection(connectionId, {
+      ...lockUpdate,
+      modelHealth,
+      connectionHealth,
+      testStatus: "unavailable",
+      lastError: reason,
+      errorCode: status,
+      lastErrorAt: new Date().toISOString(),
+      backoffLevel: newBackoffLevel ?? backoffLevel
+    });
+  } catch (error) {
+    const isBusy = error?.code === "SQLITE_BUSY" || String(error?.message || "").includes("database is locked");
+    const level = isBusy ? "warn" : "error";
+    log[level]?.("AUTH", `Failed to persist unavailable state for ${connectionId}: ${error.message}`);
+  }
 
   const lockKey = Object.keys(lockUpdate)[0];
   const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
