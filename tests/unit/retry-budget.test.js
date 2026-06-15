@@ -1,10 +1,20 @@
+import { vi } from "vitest";
+
+vi.hoisted(() => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-db-retry-budget-test-"));
+  process.env.DATA_DIR = tempDir;
+  process.env.TEMP_DATA_DIR = tempDir;
+});
+
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { handleComboChat, sortModelsByScore, filterUnhealthyCandidates } from "../../open-sse/services/combo.js";
 import { markAccountUnavailable, clearAccountError, providerCooldowns, providerTimeoutFailures, ConnectionHealth } from "../../src/sse/services/auth.js";
 import { BaseExecutor } from "../../open-sse/executors/base.js";
+import * as sqliteDb from "../../src/lib/db/index.js";
 
 // Mock proxyAwareFetch to isolate tests from network and TLS dispatchers
 let mockProxyAwareFetch = vi.fn();
@@ -17,17 +27,13 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => {
 
 describe("Retry Budget & Scoped Circuit Breakers", () => {
   const originalDataDir = process.env.DATA_DIR;
-  let tempDir;
-  let sqliteDb;
 
   beforeAll(async () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-db-retry-budget-test-"));
-    process.env.DATA_DIR = tempDir;
-    sqliteDb = await import("@/lib/db/index.js");
     await sqliteDb.initDb();
   });
 
   afterAll(() => {
+    const tempDir = process.env.TEMP_DATA_DIR;
     if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
     if (originalDataDir === undefined) delete process.env.DATA_DIR;
     else process.env.DATA_DIR = originalDataDir;
@@ -39,12 +45,10 @@ describe("Retry Budget & Scoped Circuit Breakers", () => {
     providerCooldowns.clear();
     providerTimeoutFailures.clear();
     
-    // Clear the database connections to avoid test pollution
-    if (sqliteDb) {
-      const { getAdapter } = await import("@/lib/db/driver.js");
-      const db = await getAdapter();
-      db.run("DELETE FROM providerConnections");
-    }
+    // Clear the database connections to avoid test pollution (safely inside temp database)
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const db = await getAdapter();
+    await db.run("DELETE FROM providerConnections");
   });
 
   // Test 1 — NVIDIA provider hard skip

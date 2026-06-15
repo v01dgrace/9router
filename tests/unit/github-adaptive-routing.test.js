@@ -1,9 +1,19 @@
+import { vi } from "vitest";
+
+vi.hoisted(() => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-db-routing-test-"));
+  process.env.DATA_DIR = tempDir;
+  process.env.TEMP_DATA_DIR = tempDir;
+});
+
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { classifyTask, getCapabilityScore, sessionModelLocks, handleComboChat } from "../../open-sse/services/combo.js";
 import { getIntegratorFromHeaders, markAccountUnavailable, clearAccountError, providerFailures, providerCooldowns, ConnectionHealth } from "../../src/sse/services/auth.js";
+import * as sqliteDb from "../../src/lib/db/index.js";
 
 describe("GitHub Adaptive Routing - Task Classification", () => {
   it("classifies task based on model string suffix/name", () => {
@@ -79,21 +89,12 @@ describe("GitHub Adaptive Routing - Integrator Extraction", () => {
 });
 
 describe("GitHub Adaptive Routing - Connection Health and Lockouts", () => {
-  const originalDataDir = process.env.DATA_DIR;
-  let tempDir;
-  let sqliteDb;
-
   beforeAll(async () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-db-routing-test-"));
-    process.env.DATA_DIR = tempDir;
-    sqliteDb = await import("@/lib/db/index.js");
     await sqliteDb.initDb();
   });
 
   afterAll(() => {
-    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
-    if (originalDataDir === undefined) delete process.env.DATA_DIR;
-    else process.env.DATA_DIR = originalDataDir;
+    // Shared temp dir cleanup is handled in the second describe afterAll
   });
 
   it("locks entire connection and sets QUOTA_EXHAUSTED on quota errors", async () => {
@@ -203,21 +204,13 @@ describe("GitHub Adaptive Routing - Session Lock LRU Eviction", () => {
 });
 
 describe("GitHub Adaptive Routing - Provider Health Outage Cooldown", () => {
-  const originalDataDir = process.env.DATA_DIR;
-  let tempDir;
-  let sqliteDb;
-
   beforeAll(async () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-db-provider-health-test-"));
-    process.env.DATA_DIR = tempDir;
-    sqliteDb = await import("@/lib/db/index.js");
     await sqliteDb.initDb();
   });
 
   afterAll(() => {
+    const tempDir = process.env.TEMP_DATA_DIR;
     if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
-    if (originalDataDir === undefined) delete process.env.DATA_DIR;
-    else process.env.DATA_DIR = originalDataDir;
   });
 
   it("cooldowns the provider after 5 consecutive failures and resets on success", async () => {
