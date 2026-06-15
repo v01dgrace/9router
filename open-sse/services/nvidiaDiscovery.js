@@ -73,6 +73,9 @@ const KNOWN_NIM_MODELS = [
   { model_id: "nvidia/nv-embedqa-e5-v5", family: "embedding", display_name: "NV EmbedQA E5 v5", tier: "C" },
 ];
 
+const NIM_PROBE_TIMEOUT_MS = 8000;
+const NIM_PROBE_CONCURRENCY = 3;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 function categorize(modelId, capabilities = {}) {
@@ -147,6 +150,107 @@ export async function fetchNimModels(apiKey) {
   }
 }
 
+function getNimModelId(model) {
+  return model?.id || model?.model || model?.name || model?.model_id;
+}
+
+export function isNimFunctionNotFoundError(status, payload) {
+  if (status !== 404) return false;
+  const text = [
+    payload?.detail,
+    payload?.message,
+    payload?.error?.message,
+    typeof payload?.error === "string" ? payload.error : "",
+  ].filter(Boolean).join(" ").toLowerCase();
+  return text.includes("function") && text.includes("not found") && text.includes("account");
+}
+
+export function isProbeableNimChatModel(model) {
+  const id = String(getNimModelId(model) || "").toLowerCase();
+  if (!id) return false;
+  return !id.includes("embedding") &&
+    !id.includes("embed") &&
+    !id.includes("image") &&
+    !id.includes("audio") &&
+    !id.includes("video") &&
+    !id.includes("rerank") &&
+    !id.includes("tts") &&
+    !id.includes("whisper") &&
+    !id.includes("asr") &&
+    !id.includes("parakeet");
+}
+
+export async function probeNimChatModel(modelId, apiKey) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), NIM_PROBE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${NIM_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    if (response.ok) return { ok: true };
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = { message: await response.text().catch(() => "") };
+    }
+
+    if (isNimFunctionNotFoundError(response.status, payload)) {
+      return { ok: false, reason: "function_not_found" };
+    }
+
+    return { ok: true, warning: `probe_http_${response.status}` };
+  } catch (error) {
+    return { ok: true, warning: error?.name === "AbortError" ? "probe_timeout" : "probe_error" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function filterCallableNimModels(models, apiKey) {
+  if (!apiKey || !Array.isArray(models) || models.length === 0) {
+    return { models: models || [], filtered: [], warnings: [] };
+  }
+
+  const kept = [];
+  const filtered = [];
+  const warnings = [];
+
+  for (let index = 0; index < models.length; index += NIM_PROBE_CONCURRENCY) {
+    const chunk = models.slice(index, index + NIM_PROBE_CONCURRENCY);
+    const results = await Promise.all(chunk.map(async (model) => {
+      const id = getNimModelId(model);
+      if (!isProbeableNimChatModel(model)) return { model, keep: true };
+      const probe = await probeNimChatModel(id, apiKey);
+      return { model, id, keep: probe.ok, reason: probe.reason, warning: probe.warning };
+    }));
+
+    for (const result of results) {
+      if (result.keep) {
+        kept.push(result.model);
+        if (result.warning) warnings.push({ id: result.id, warning: result.warning });
+      } else {
+        filtered.push({ id: result.id, reason: result.reason });
+      }
+    }
+  }
+
+  return { models: kept, filtered, warnings };
+}
+
 /**
  * Sync discovered models into provider_models table.
  * Merges API-discovered + known fallback → DB.
@@ -199,6 +303,14 @@ export async function syncNimModelsToDb(apiKey = null) {
       max_context: caps.max_context || null,
       capabilities: JSON.stringify(caps),
     });
+  }
+
+  if (apiKey && entries.length > 0) {
+    const { models: callableEntries, filtered } = await filterCallableNimModels(entries, apiKey);
+    if (filtered.length > 0) {
+      console.warn(`[NIM] Filtered ${filtered.length} unavailable hosted models: ${filtered.map((m) => m.id).join(", ")}`);
+    }
+    entries = callableEntries;
   }
 
   // 3. Upsert

@@ -6,6 +6,7 @@ import { refreshGoogleToken, updateProviderCredentials, checkAndRefreshToken } f
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
+import { filterCallableNimModels } from "open-sse/services/nvidiaDiscovery.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -652,6 +653,18 @@ export async function GET(request, { params }) {
       });
     }
 
+    let filteredModels = [];
+    let modelWarnings = [];
+    if (connection.provider === "nvidia") {
+      const result = await filterCallableNimModels(models, token);
+      models = result.models;
+      filteredModels = result.filtered;
+      modelWarnings = result.warnings;
+      if (filteredModels.length > 0) {
+        console.warn(`[NIM] Filtered ${filteredModels.length} unavailable hosted models for connection ${connection.id}`);
+      }
+    }
+
     // Save availableModels to the database
     if (connection.provider === "github") {
       const integrator = request.headers.get("copilot-integration-id") || "vscode-chat";
@@ -672,7 +685,9 @@ export async function GET(request, { params }) {
     return NextResponse.json({
       provider: connection.provider,
       connectionId: connection.id,
-      models
+      models,
+      ...(filteredModels.length > 0 ? { filteredModels } : {}),
+      ...(modelWarnings.length > 0 ? { warnings: modelWarnings } : {}),
     });
   } catch (error) {
     console.log("Error fetching provider models:", error);
