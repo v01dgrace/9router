@@ -118,7 +118,7 @@ export async function handleChat(request, clientRawRequest = null) {
     return handleComboChat({
       body,
       models: comboModels,
-      handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+      handleSingleModel: (b, m, opts) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, opts),
       log,
       comboName: activeModelStr,
       comboStrategy,
@@ -134,7 +134,7 @@ export async function handleChat(request, clientRawRequest = null) {
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+export async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, options = {}) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -156,7 +156,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       return handleComboChat({
         body,
         models: comboModels,
-        handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        handleSingleModel: (b, m, opts) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, opts),
         log,
         comboName: modelStr,
         comboStrategy,
@@ -203,6 +203,18 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const requestStartTime = Date.now();
 
   while (true) {
+    if (options.retryBudget?.isComboPath) {
+      if (excludeConnectionIds.size >= options.retryBudget.maxAccountsPerModel) {
+        log.warn("CHAT", `Account loop hit budget limit: ${excludeConnectionIds.size} >= ${options.retryBudget.maxAccountsPerModel}`);
+        const resp = errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "Account budget exhausted");
+        resp.decision = {
+          action: 'SWITCH_MODEL_OR_PROVIDER',
+          reason: 'account_budget_exhausted'
+        };
+        return resp;
+      }
+    }
+
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
       headers: request?.headers
     });
@@ -213,14 +225,35 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        const resp = unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        if (options.retryBudget?.isComboPath) {
+          resp.decision = {
+            action: 'SWITCH_MODEL_OR_PROVIDER',
+            reason: 'account_budget_exhausted'
+          };
+        }
+        return resp;
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
+        const resp = errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
+        if (options.retryBudget?.isComboPath) {
+          resp.decision = {
+            action: 'SWITCH_MODEL_OR_PROVIDER',
+            reason: 'account_budget_exhausted'
+          };
+        }
+        return resp;
       }
       log.warn("CHAT", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      const resp = errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      if (options.retryBudget?.isComboPath) {
+        resp.decision = {
+          action: 'SWITCH_MODEL_OR_PROVIDER',
+          reason: 'account_budget_exhausted'
+        };
+      }
+      return resp;
     }
 
     // Log account selection
@@ -248,6 +281,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       log,
       clientRawRequest,
       connectionId: credentials.connectionId,
+      retryBudget: options.retryBudget,
       userAgent,
       apiKey,
       ccFilterNaming: !!chatSettings.ccFilterNaming,
@@ -291,7 +325,20 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       checkPromotionDemotion(`${provider}/${model}`, false, Date.now() - requestStartTime).catch(() => {});
     }
 
-    if (shouldFallback) {
+    const decision = classifyRuntimeFailure(result.error, result.status, {
+      provider,
+      model,
+      account: credentials,
+      retryBudget: options.retryBudget
+    });
+
+    if (decision.action === 'SWITCH_MODEL_OR_PROVIDER') {
+      const resp = result.response || errorResponse(result.status, result.error);
+      resp.decision = decision;
+      return resp;
+    }
+
+    if (shouldFallback && decision.action === 'TRY_OTHER_ACCOUNT') {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
@@ -301,4 +348,40 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     return result.response;
   }
+}
+
+/**
+ * Classify runtime failures to determine fallback and routing decisions
+ */
+function classifyRuntimeFailure(error, status, { provider, model, account, retryBudget }) {
+  const isCombo = retryBudget && retryBudget.isComboPath;
+  const errorText = error?.message || String(error || "");
+  const lowerError = errorText.toLowerCase();
+  
+  const isTimeout = status === 502 || lowerError.includes("timeout") || lowerError.includes("abort") || lowerError.includes("502");
+  const is429 = status === 429;
+  const is410 = status === 410;
+  const is401 = status === 401;
+  const isOther5xx = status >= 500 && status !== 502;
+  
+  if (isCombo) {
+    if (isTimeout || is429 || is410 || isOther5xx) {
+      return {
+        action: 'SWITCH_MODEL_OR_PROVIDER',
+        reason: isTimeout ? 'timeout' : (is429 ? 'rate_limit' : (is410 ? 'model_gone' : 'server_error'))
+      };
+    }
+    if (is401) {
+      return {
+        action: 'TRY_OTHER_ACCOUNT',
+        reason: 'unauthorized'
+      };
+    }
+  }
+  
+  // Default non-combo fallback behavior
+  return {
+    action: 'TRY_OTHER_ACCOUNT',
+    reason: 'fallback'
+  };
 }

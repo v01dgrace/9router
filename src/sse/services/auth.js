@@ -348,6 +348,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  */
 export const providerFailures = new Map(); // providerId -> count
 export const providerCooldowns = new Map(); // providerId -> timestamp (cooldown expiration)
+export const providerTimeoutFailures = new Map(); // providerId -> count of timeout/502 failures
 
 export function isFatalModelError(status, errorText) {
   const lowerError = String(errorText || "").toLowerCase();
@@ -401,12 +402,70 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
                   lowerError.includes("billing") || 
                   status === 403;
 
+  const is401 = status === 401;
+  const is429 = status === 429;
+  const is410 = status === 410;
+  const isTimeoutOr502 = status === 502 || lowerError.includes("timeout") || lowerError.includes("502");
+
   if (isQuota) {
     // Lock the entire connection (account-level lock) for 24 hours
     cooldownForLock = 24 * 60 * 60 * 1000;
     lockModel = null;
     connectionHealth = ConnectionHealth.QUOTA_EXHAUSTED;
     log.warn("AUTH", `Locking connection ${connectionId} for 24 hours due to quota exhaustion: ${reason}`);
+  } else if (is401) {
+    // 401: account circuit
+    cooldownForLock = 24 * 60 * 60 * 1000;
+    lockModel = null;
+    connectionHealth = ConnectionHealth.RATE_LIMITED;
+    log.warn("AUTH", `Locking connection ${connectionId} for 24 hours due to 401 unauthorized`);
+  } else if (is429) {
+    // 429: account circuit trước, provider circuit chỉ khi rateLimitedRatio >= 0.8
+    cooldownForLock = cooldownMs || 60 * 1000;
+    lockModel = null;
+    connectionHealth = ConnectionHealth.RATE_LIMITED;
+    log.warn("AUTH", `Locking connection ${connectionId} for ${cooldownForLock}ms due to 429 rate limit`);
+
+    if (provider) {
+      const connections = await getProviderConnections({ provider });
+      const activeAccounts = connections.length;
+      const rateLimitedAccounts = connections.filter(c => 
+        c.id === connectionId || 
+        c.connectionHealth === ConnectionHealth.RATE_LIMITED ||
+        c.connectionHealth === 'RATE_LIMITED'
+      ).length;
+      const ratio = activeAccounts > 0 ? (rateLimitedAccounts / activeAccounts) : 0;
+      if (ratio >= 0.8) {
+        const cooldownUntil = Date.now() + 5 * 60 * 1000;
+        providerCooldowns.set(provider, cooldownUntil);
+        log.warn("AUTH", `Provider ${provider} triggered outage cooldown (rate limited ratio ${ratio} >= 0.8). Cooling down for 5 minutes.`);
+      }
+    }
+  } else if (is410 && model) {
+    // 410: model circuit dài
+    cooldownForLock = 24 * 60 * 60 * 1000;
+    lockModel = model;
+    log.warn("AUTH", `Model circuit open (410 Gone) for ${model} across all accounts`);
+    
+    // Lock for all connections of this provider
+    try {
+      const allConns = await getProviderConnections({ provider });
+      for (const c of allConns) {
+        let mh = c.modelHealth || {};
+        const modelRecord = mh[model] || { failCount: 0 };
+        modelRecord.disabledUntil = new Date(Date.now() + cooldownForLock).toISOString();
+        modelRecord.status = "fatal_error";
+        mh[model] = modelRecord;
+        
+        const lockUpdate = buildModelLockUpdate(model, cooldownForLock);
+        await updateProviderConnection(c.id, {
+          ...lockUpdate,
+          modelHealth: mh
+        });
+      }
+    } catch (err) {
+      log.warn("AUTH", `Failed to apply 410 model lock across accounts: ${err.message}`);
+    }
   } else if (model) {
     const isFatal = isFatalModelError(status, reason);
 
@@ -434,17 +493,28 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
     // Provider-wide outage tracking for transient failures
     if (provider && !isFatal) {
-      const currentFailures = (providerFailures.get(provider) || 0) + 1;
-      providerFailures.set(provider, currentFailures);
-      if (currentFailures >= 5) {
-        const cooldownUntil = Date.now() + 5 * 60 * 1000;
-        providerCooldowns.set(provider, cooldownUntil);
-        log.warn("AUTH", `Provider ${provider} triggered outage cooldown (5 consecutive failures). Cooling down for 5 minutes.`);
+      if (isTimeoutOr502) {
+        // fetch connect timeout / 502: model timeout counter trước, provider circuit chỉ khi timeout lặp lại qua nhiều model/account
+        const currentTimeouts = (providerTimeoutFailures.get(provider) || 0) + 1;
+        providerTimeoutFailures.set(provider, currentTimeouts);
+        if (currentTimeouts >= 5) {
+          const cooldownUntil = Date.now() + 5 * 60 * 1000;
+          providerCooldowns.set(provider, cooldownUntil);
+          log.warn("AUTH", `Provider ${provider} timeout circuit open (5 consecutive timeouts). Cooling down for 5 minutes.`);
+        }
+      } else {
+        const currentFailures = (providerFailures.get(provider) || 0) + 1;
+        providerFailures.set(provider, currentFailures);
+        if (currentFailures >= 5) {
+          const cooldownUntil = Date.now() + 5 * 60 * 1000;
+          providerCooldowns.set(provider, cooldownUntil);
+          log.warn("AUTH", `Provider ${provider} triggered outage cooldown (5 consecutive failures). Cooling down for 5 minutes.`);
+        }
       }
     }
   }
 
-  if (!isQuota && (status === 429 || resetsAtMs || (model && modelHealth[model]?.status === "transient_error"))) {
+  if (!isQuota && (status === 429 || status === 401 || resetsAtMs || (model && modelHealth[model]?.status === "transient_error"))) {
     connectionHealth = ConnectionHealth.RATE_LIMITED;
   }
 
@@ -498,6 +568,7 @@ export async function clearAccountError(connectionId, currentConnection, model =
   // Clear provider-level failures/cooldown on successful request
   if (conn.provider) {
     providerFailures.set(conn.provider, 0);
+    providerTimeoutFailures.set(conn.provider, 0);
     providerCooldowns.delete(conn.provider);
   }
 

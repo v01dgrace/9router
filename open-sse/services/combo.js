@@ -395,19 +395,75 @@ export function getCapabilityScore(taskClass, modelId) {
 }
 
 /**
- * Sort models in a combo dynamically based on score
- * score = availability * 30 + health * 25 + capability * 25 + latency * 10 + priority * 10 + stabilityBonus
+ * Filter unhealthy model candidates based on rate limit ratios, transient errors, and circuit status
  */
+export async function filterUnhealthyCandidates(models, integrator = "vscode-chat") {
+  const healthy = [];
+  const { ConnectionHealth } = await import("../../src/sse/services/auth.js");
+  
+  for (const modelStr of models) {
+    try {
+      const modelInfo = await getModelInfo(modelStr);
+      if (!modelInfo || !modelInfo.provider) {
+        healthy.push(modelStr);
+        continue;
+      }
+      const { provider, model } = modelInfo;
+      const connections = await getProviderConnections({ provider, isActive: true });
+      
+      // 1. providerRateLimitedRatio >= 0.8
+      const activeAccounts = connections.length;
+      const rateLimitedAccounts = connections.filter(conn => 
+        conn.connectionHealth === ConnectionHealth.RATE_LIMITED || 
+        conn.connectionHealth === 'RATE_LIMITED'
+      ).length;
+      const ratio = activeAccounts > 0 ? (rateLimitedAccounts / activeAccounts) : 0;
+      if (ratio >= 0.8) {
+        console.warn(`[COMBO] Hard skip candidate ${modelStr}: provider_rate_limited_ratio_high (${rateLimitedAccounts}/${activeAccounts})`);
+        continue;
+      }
+      
+      // 2. modelStatus === 'transient_error' && modelFailCount >= 5
+      const isModelTransientHighFail = connections.length > 0 && connections.every(conn => {
+        const mh = conn.modelHealth?.[model];
+        return mh && mh.status === 'transient_error' && (mh.failCount || 0) >= 5;
+      });
+      if (isModelTransientHighFail) {
+        console.warn(`[COMBO] Hard skip candidate ${modelStr}: model_transient_error_high_fail_count`);
+        continue;
+      }
+      
+      // 3. modelLockedUntil && modelLockedUntil > Date.now()
+      const isModelCircuitOpen = connections.length > 0 && connections.every(conn => {
+        const key = `modelLock_${model}`;
+        const expiry = conn[key] || conn.modelLock___all;
+        return expiry && new Date(expiry).getTime() > Date.now();
+      });
+      if (isModelCircuitOpen) {
+        console.warn(`[COMBO] Hard skip candidate ${modelStr}: model_circuit_open`);
+        continue;
+      }
+      
+      healthy.push(modelStr);
+    } catch (err) {
+      console.error(`[COMBO] Error checking health for ${modelStr}:`, err);
+      healthy.push(modelStr); // fail open
+    }
+  }
+  return healthy;
+}
+
 /**
  * Sort models in a combo dynamically based on score
  * score = availability * 30 + health * 25 + capability * 25 + latency * 10 + priority * 10 + stabilityBonus
  */
-async function sortModelsByScore(models, taskClass = "general", activeLockModel = null, integrator = "vscode-chat") {
+export async function sortModelsByScore(models, taskClass = "general", activeLockModel = null, integrator = "vscode-chat") {
+  const healthyModels = await filterUnhealthyCandidates(models, integrator);
   const providerConnectionsCache = new Map();
   const modelInfoCache = new Map();
 
   const scoredModels = await Promise.all(
-    models.map(async (modelStr) => {
+    healthyModels.map(async (modelStr) => {
       let score = 0;
       let availability = 0;
       let health = 1.0;
@@ -575,6 +631,17 @@ export function getComboModelsFromData(modelStr, combosData) {
  * @returns {Promise<Response>}
  */
 export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, headers = null }) {
+  const integrator = getIntegratorFromHeaders(headers);
+  const healthyModels = await filterUnhealthyCandidates(models, integrator);
+
+  if (healthyModels.length === 0) {
+    log.warn("COMBO", "No healthy combo candidate available");
+    return new Response(
+      JSON.stringify({ error: { message: "No healthy combo candidate available", code: "no_healthy_candidate" } }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
   const sessionId = extractSessionId(body, headers);
   const taskClass = classifyTask(comboName, body);
   const sessionKey = sessionId ? `${sessionId}:${taskClass}` : null;
@@ -596,16 +663,40 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   const activeLock = sessionKey ? sessionModelLocks.get(sessionKey) : null;
   const activeLockModel = activeLock ? activeLock.modelStr : null;
 
+  // Build retry budget object
+  const retryBudget = {
+    isComboPath: true,
+    maxExecutorRetries: 0,
+    disableExecutorRetryFor: [
+      'FETCH_CONNECT_TIMEOUT',
+      'HTTP_502',
+      'HTTP_429',
+      'HTTP_410',
+    ],
+    maxAccountsPerModel: 1,
+    maxAttemptsPerModel: 1,
+    maxTotalAttempts: 4,
+    maxProvidersPerRequest: 3,
+    switchCandidateOn: [
+      'FETCH_CONNECT_TIMEOUT',
+      'HTTP_502',
+      'HTTP_429',
+      'HTTP_410',
+      'MODEL_TRANSIENT_ERROR_HIGH_FAILCOUNT',
+    ],
+    totalAttempts: 0,
+    providersTried: new Set(),
+  };
+
   // Apply rotation or score strategy
   let rotatedModels;
   let explanationMap = null;
   if (comboStrategy === "score") {
-    const integrator = getIntegratorFromHeaders(headers);
-    const scoreResult = await sortModelsByScore(models, taskClass, activeLockModel, integrator);
+    const scoreResult = await sortModelsByScore(healthyModels, taskClass, activeLockModel, integrator);
     rotatedModels = scoreResult.sortedModels;
     explanationMap = scoreResult.explanationMap;
   } else {
-    rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
+    rotatedModels = getRotatedModels(healthyModels, comboName, comboStrategy, comboStickyLimit);
     explanationMap = Object.fromEntries(rotatedModels.map(m => [m, {
       selectedModel: m,
       taskClass,
@@ -632,10 +723,27 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
     const exp = explanationMap?.[modelStr];
+
+    if (retryBudget.totalAttempts >= retryBudget.maxTotalAttempts) {
+      log.warn("COMBO", `Combo retry budget exhausted: ${retryBudget.totalAttempts} >= ${retryBudget.maxTotalAttempts}`);
+      const resp = new Response(
+        JSON.stringify({ error: { message: "Combo retry budget exhausted", code: "retry_budget_exhausted" } }),
+        { status: 503, headers: { "Content-Type": "application/json" } }
+      );
+      resp.decision = { action: 'STOP_COMBO', reason: 'retry_budget_exhausted' };
+      return resp;
+    }
+
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}${exp ? ` (score: ${exp.score}, capability: ${exp.capability}, health: ${exp.health})` : ""}`);
 
     try {
-      const result = await handleSingleModel(body, modelStr);
+      const result = await handleSingleModel(body, modelStr, {
+        retryBudget,
+        comboContext: {
+          comboName,
+          candidateCount: rotatedModels.length
+        }
+      });
       
       // Success (2xx) - return response
       if (result.ok) {
@@ -697,6 +805,27 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         retryAfter = errorBody?.retryAfter || null;
       } catch {
         // Ignore JSON parse errors
+      }
+
+      if (result.decision?.action === 'SWITCH_MODEL_OR_PROVIDER') {
+        log.info("COMBO", `Model ${modelStr} failed, switching candidate due to decision: ${result.decision.reason}`);
+        lastError = errorText || String(result.status);
+        if (!lastStatus) lastStatus = result.status;
+        
+        // Track NIM model health on failure
+        if (modelStr.startsWith("nvidia/")) {
+          const nimModelId = modelStr.slice(7);
+          updateNimModelHealth(nimModelId, false, null).catch(() => {});
+        }
+        if (sessionKey && activeLockModel === modelStr) {
+          sessionModelLocks.delete(sessionKey);
+        }
+        continue;
+      }
+
+      if (result.decision?.action === 'STOP_COMBO') {
+        log.warn("COMBO", `Stopping combo execution due to STOP_COMBO decision`);
+        return result;
       }
 
       // Track earliest retryAfter across all combo models

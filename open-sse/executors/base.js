@@ -96,7 +96,7 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, retryBudget = null, timeoutOverride = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
@@ -107,7 +107,25 @@ export class BaseExecutor {
 
     // Schedule retry via retryConfig[statusKey]. Returns true when caller should `urlIndex--; continue`
     // response (optional) lets a subclass hook compute a dynamic delay (e.g. antigravity Retry-After).
-    const tryRetry = async (urlIndex, statusKey, reason, response = null) => {
+    const tryRetry = async (urlIndex, statusKey, reason, response = null, isTimeout = false) => {
+      if (retryBudget) {
+        let type = `HTTP_${statusKey}`;
+        if (isTimeout) {
+          type = "FETCH_CONNECT_TIMEOUT";
+        }
+        
+        const currentAttempts = retryAttemptsByUrl[urlIndex] || 0;
+        const maxRetries = retryBudget.maxExecutorRetries;
+        
+        if (currentAttempts >= maxRetries) {
+          return false;
+        }
+        
+        if (retryBudget.disableExecutorRetryFor && retryBudget.disableExecutorRetryFor.includes(type)) {
+          return false;
+        }
+      }
+
       const { attempts, delayMs } = resolveRetryEntry(retryConfig[statusKey]);
       if (attempts <= 0 || retryAttemptsByUrl[urlIndex] >= attempts) return false;
       // Hook: subclass may derive delay from the response (headers/body). null → skip retry, use fallback.
@@ -130,11 +148,32 @@ export class BaseExecutor {
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
+      if (retryBudget) {
+        if (retryBudget.totalAttempts >= retryBudget.maxTotalAttempts) {
+          const budgetErr = new Error('Combo retry budget exhausted');
+          budgetErr.name = 'RetryBudgetExhausted';
+          throw budgetErr;
+        }
+        retryBudget.totalAttempts++;
+      }
+
       // Abort if upstream doesn't return response headers within connection timeout
-      const connectCtrl = new AbortController();
-      const timeoutMs = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
-      const connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), timeoutMs);
-      const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
+      let timeoutMs = timeoutOverride || this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
+      if (!timeoutOverride && (this.provider === "nvidia" || this.provider === "nim")) {
+        timeoutMs = 30000; // 30s timeout override for NVIDIA/NIM
+      }
+
+      const connectCtrl = typeof AbortSignal.timeout === "function" ? null : new AbortController();
+      let connectTimer = null;
+      if (connectCtrl) {
+        connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), timeoutMs);
+      }
+      
+      const timeoutSignal = typeof AbortSignal.timeout === "function"
+        ? AbortSignal.timeout(timeoutMs)
+        : connectCtrl.signal;
+
+      const mergedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
       try {
         const bodyStr = JSON.stringify(transformedBody);
@@ -146,12 +185,12 @@ export class BaseExecutor {
           body: bodyStr,
           signal: mergedSignal
         }, proxyOptions);
-        clearTimeout(connectTimer);
+        if (connectTimer) clearTimeout(connectTimer);
         const ct = response.headers?.get?.("content-type") || "";
         const cl = response.headers?.get?.("content-length") || "?";
         dbg("FETCH", `${this.provider.toUpperCase()} ← ${response.status} | ttft=${Date.now() - fetchT0}ms | ct=${ct} | cl=${cl}`);
 
-        if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) { urlIndex--; continue; }
+        if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response, false)) { urlIndex--; continue; }
 
         if (this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
@@ -161,15 +200,18 @@ export class BaseExecutor {
 
         return { response, url, headers, transformedBody };
       } catch (error) {
-        clearTimeout(connectTimer);
+        if (connectTimer) clearTimeout(connectTimer);
         lastError = error;
-        const isConnectTimeout = connectCtrl.signal.aborted && error.name === "AbortError";
+        const isConnectTimeout = (connectCtrl && connectCtrl.signal.aborted && error.name === "AbortError") ||
+                                 (error.name === "TimeoutError") ||
+                                 (error.message && error.message.includes("timeout"));
+
         dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${error.name}: ${error.message}${isConnectTimeout ? " (connect timeout)" : ""}`);
         // Connect timeout is internal — convert to retryable network error, don't propagate AbortError
         if (error.name === "AbortError" && !isConnectTimeout) throw error;
 
         // Map network/fetch exceptions to 502 retry config
-        if (await tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, `network "${error.message}"`)) { urlIndex--; continue; }
+        if (await tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, `network "${error.message}"`, null, isConnectTimeout)) { urlIndex--; continue; }
 
         if (urlIndex + 1 < fallbackCount) {
           log?.debug?.("RETRY", `Error on ${url}, trying fallback ${urlIndex + 1}`);
