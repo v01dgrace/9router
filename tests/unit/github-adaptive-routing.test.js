@@ -35,7 +35,7 @@ describe("GitHub Adaptive Routing - Capability Scoring", () => {
   it("returns correct suitability scores for specific models", () => {
     // Coding task
     expect(getCapabilityScore("coding", "github/claude-sonnet-4.6")).toBe(1.0);
-    expect(getCapabilityScore("coding", "github/gpt-4o")).toBe(0.9);
+    expect(getCapabilityScore("coding", "github/gpt-4o")).toBe(0.75);
     expect(getCapabilityScore("coding", "github/claude-haiku-4.5")).toBe(0.6);
 
     // Fast task
