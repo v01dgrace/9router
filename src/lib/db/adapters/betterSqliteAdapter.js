@@ -3,9 +3,11 @@ import { PRAGMA_SQL } from "../schema.js";
 
 // Periodic checkpoint to keep WAL file small (avoid huge -wal/-shm growth)
 const CHECKPOINT_INTERVAL_MS = 60 * 1000;
+const SQLITE_BUSY_RETRIES = 4;
+const SQLITE_BUSY_RETRY_DELAYS_MS = [25, 50, 100, 200];
 
 export function createBetterSqliteAdapter(filePath) {
-  const db = new Database(filePath);
+  const db = new Database(filePath, { timeout: 10000 });
   db.exec(PRAGMA_SQL);
   // Schema is created/synced by migrate.js after adapter init
 
@@ -18,6 +20,26 @@ export function createBetterSqliteAdapter(filePath) {
       stmtCache.set(sql, stmt);
     }
     return stmt;
+  }
+
+  function sleepSync(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  }
+
+  function withBusyRetry(operation) {
+    let lastError;
+    for (let attempt = 0; attempt <= SQLITE_BUSY_RETRIES; attempt++) {
+      try {
+        return operation();
+      } catch (error) {
+        lastError = error;
+        if (error?.code !== "SQLITE_BUSY" || attempt === SQLITE_BUSY_RETRIES) {
+          throw error;
+        }
+        sleepSync(SQLITE_BUSY_RETRY_DELAYS_MS[attempt] || 200);
+      }
+    }
+    throw lastError;
   }
 
   // Truncate WAL periodically so file stays small for backup/copy
@@ -40,11 +62,11 @@ export function createBetterSqliteAdapter(filePath) {
 
   return {
     driver: "better-sqlite3",
-    run(sql, params = []) { return prepare(sql).run(params); },
-    get(sql, params = []) { return prepare(sql).get(params); },
-    all(sql, params = []) { return prepare(sql).all(params); },
-    exec(sql) { return db.exec(sql); },
-    transaction(fn) { return db.transaction(fn)(); },
+    run(sql, params = []) { return withBusyRetry(() => prepare(sql).run(params)); },
+    get(sql, params = []) { return withBusyRetry(() => prepare(sql).get(params)); },
+    all(sql, params = []) { return withBusyRetry(() => prepare(sql).all(params)); },
+    exec(sql) { return withBusyRetry(() => db.exec(sql)); },
+    transaction(fn) { return withBusyRetry(() => db.transaction(fn)()); },
     checkpoint() { try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {} },
     close() {
       clearInterval(checkpointTimer);
