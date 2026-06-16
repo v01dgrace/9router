@@ -212,6 +212,80 @@ function importLegacyDetails(adapter, data) {
   }
 }
 
+function seedDefaultLlmCombos(adapter) {
+  try {
+    const combosToSeed = [
+      {
+        name: "free-forever",
+        models: ["opencode/big-pickle", "mimo-free/mimo-auto"]
+      },
+      {
+        name: "openclaw-free",
+        models: ["opencode/big-pickle", "mimo-free/mimo-auto"]
+      },
+      {
+        name: "github-stable",
+        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gpt-4o-mini", "github/gpt-4.1"],
+        updateExisting: true
+      },
+      {
+        name: "github-experimental",
+        models: ["github/gpt-5.5", "github/gpt-5.4", "github/gpt-5.3-codex", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"],
+        updateExisting: true
+      },
+      {
+        name: "github-fast",
+        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/gpt-4o-mini"],
+        updateExisting: true
+      },
+      {
+        name: "github-coding",
+        models: ["github/claude-sonnet-4.6", "github/gpt-5.4", "github/gpt-5.4-mini"],
+        updateExisting: true
+      },
+      {
+        name: "github-agent",
+        models: ["github/gpt-5.3-codex", "github/gpt-5.2-codex", "github/claude-sonnet-4.6", "github/gpt-4o"],
+        updateExisting: true
+      },
+      {
+        name: "github-reasoning",
+        models: ["github/gpt-5.5", "github/gpt-5.4", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"],
+        updateExisting: true
+      },
+      {
+        name: "github-canary",
+        models: [
+          "github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gpt-4o-mini", "github/gpt-4.1",
+          "github/gpt-5.5", "github/gpt-5.4", "github/gpt-5.3-codex", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"
+        ],
+        updateExisting: true
+      }
+    ];
+
+    for (const item of combosToSeed) {
+      const exists = adapter.get("SELECT COUNT(*) as c FROM combos WHERE name = ?", [item.name])?.c > 0;
+      const now = new Date().toISOString();
+      if (!exists) {
+        const id = `combo-${item.name.replace("github-", "")}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        adapter.run(
+          "INSERT INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)",
+          [id, item.name, null, JSON.stringify(item.models), now, now]
+        );
+        console.log(`[DB] Seeded combo ${item.name}`);
+      } else if (item.updateExisting) {
+        adapter.run(
+          "UPDATE combos SET models = ?, updatedAt = ? WHERE name = ?",
+          [JSON.stringify(item.models), now, item.name]
+        );
+        console.log(`[DB] Updated combo ${item.name} with new default model list`);
+      }
+    }
+  } catch (err) {
+    console.warn("[DB] Failed to seed/update default LLM combos:", err.message);
+  }
+}
+
 // ─── Main entry ──────────────────────────────────────────────────────────
 export async function runMigrationOnce(adapter) {
   if (_migratedAdapters.has(adapter)) return;
@@ -259,12 +333,14 @@ export async function runMigrationOnce(adapter) {
 
     try { fs.writeFileSync(MIGRATED_MARKER, new Date().toISOString()); } catch {}
     pruneOldBackups();
+    seedDefaultLlmCombos(adapter);
     console.log(`[DB][migrate] JSON → SQLite in ${Date.now() - t0}ms | legacy JSON kept at DATA_DIR | backup: ${backupDir}`);
     return;
   }
 
   if (fresh) {
     setMetaSync(adapter, "appVersion", getAppVersion());
+    seedDefaultLlmCombos(adapter);
     return;
   }
 
@@ -284,63 +360,8 @@ export async function runMigrationOnce(adapter) {
     pruneOldBackups();
   }
 
-  // Seed default GitHub combos if they don't exist, or update them to match new default configurations
-  try {
-    const combosToSeed = [
-      {
-        name: "github-stable",
-        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gpt-4o-mini", "github/gpt-4.1"]
-      },
-      {
-        name: "github-experimental",
-        models: ["github/gpt-5.5", "github/gpt-5.4", "github/gpt-5.3-codex", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"]
-      },
-      {
-        name: "github-fast",
-        models: ["github/gpt-5-mini", "github/claude-haiku-4.5", "github/gpt-4o-mini"]
-      },
-      {
-        name: "github-coding",
-        models: ["github/claude-sonnet-4.6", "github/gpt-5.4", "github/gpt-5.4-mini"]
-      },
-      {
-        name: "github-agent",
-        models: ["github/gpt-5.3-codex", "github/gpt-5.2-codex", "github/claude-sonnet-4.6", "github/gpt-4o"]
-      },
-      {
-        name: "github-reasoning",
-        models: ["github/gpt-5.5", "github/gpt-5.4", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"]
-      },
-      {
-        name: "github-canary",
-        models: [
-          "github/gpt-5-mini", "github/claude-haiku-4.5", "github/claude-sonnet-4.6", "github/gpt-4o-mini", "github/gpt-4.1",
-          "github/gpt-5.5", "github/gpt-5.4", "github/gpt-5.3-codex", "github/claude-opus-4.8", "github/gemini-3.1-pro-preview"
-        ]
-      }
-    ];
-
-    for (const item of combosToSeed) {
-      const exists = adapter.get("SELECT COUNT(*) as c FROM combos WHERE name = ?", [item.name])?.c > 0;
-      const now = new Date().toISOString();
-      if (!exists) {
-        const id = `combo-${item.name.replace("github-", "")}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-        adapter.run(
-          "INSERT INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)",
-          [id, item.name, null, JSON.stringify(item.models), now, now]
-        );
-        console.log(`[DB] Seeded combo ${item.name}`);
-      } else {
-        adapter.run(
-          "UPDATE combos SET models = ?, updatedAt = ? WHERE name = ?",
-          [JSON.stringify(item.models), now, item.name]
-        );
-        console.log(`[DB] Updated combo ${item.name} with new default model list`);
-      }
-    }
-  } catch (err) {
-    console.warn("[DB] Failed to seed/update default combos:", err.message);
-  }
+  // Seed default LLM combos if they don't exist, or update them to match new default configurations
+  seedDefaultLlmCombos(adapter);
 
   // Trigger NIM auto-discovery on fresh DB (first-time setup)
   // For existing DB, autoRefreshIfDue checks the 12h interval
