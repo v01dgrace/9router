@@ -47,6 +47,44 @@ const COOLDOWN = {
   short: 5 * 1000,
 };
 
+// Substrings identifying context overflow / prompt length limits where model combos should fall back.
+export const CONTEXT_OVERFLOW_SUBSTRINGS = [
+  "max_tokens",
+  "context_length",
+  "context length",
+  "maximum context length",
+  "context_length_exceeded",
+  "prompt is too long",
+  "too many tokens",
+  "exceeds the limit",
+];
+
+// Substrings identifying provider/model capability mismatches (e.g. tools, parameters).
+export const MODEL_CAPABILITY_LIMITATION_SUBSTRINGS = [
+  "not supported",
+  "tool-call",
+  "tool call",
+  "single tool",
+  "only supports",
+  "does not support",
+];
+
+/**
+ * Check if an error message indicates context overflow or model capability limitation.
+ * Used by model combos to decide whether to fall back to another model.
+ *
+ * @param {string|unknown} errorText
+ * @returns {boolean}
+ */
+export function isModelLimitationError(errorText) {
+  if (!errorText) return false;
+  const lower = typeof errorText === "string" ? errorText.toLowerCase() : String(errorText).toLowerCase();
+  return (
+    CONTEXT_OVERFLOW_SUBSTRINGS.some((s) => lower.includes(s)) ||
+    MODEL_CAPABILITY_LIMITATION_SUBSTRINGS.some((s) => lower.includes(s))
+  );
+}
+
 /**
  * Unified error classification rules.
  * Checked top-to-bottom: text rules first (by order), then status rules.
@@ -70,10 +108,7 @@ export const ERROR_RULES = [
   { text: "unsupported_parameter",    pass: true },
   { text: "invalid parameter",        pass: true },
   { text: "invalid_parameter",        pass: true },
-  { text: "maximum context length",   pass: true },
-  { text: "context_length_exceeded",  pass: true },
-  { text: "prompt is too long",       pass: true },
-  { text: "exceeds the limit",        pass: true },
+  ...CONTEXT_OVERFLOW_SUBSTRINGS.map(text => ({ text, pass: true })),
   { text: "rate limit",               backoff: true },
   { text: "too many requests",        backoff: true },
   { text: "quota exceeded",           backoff: true },

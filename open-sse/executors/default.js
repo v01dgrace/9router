@@ -7,6 +7,7 @@ import { buildClineHeaders } from "../shared/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import { isAnthropicNativeProvider } from "../translator/formats/claude.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -154,8 +155,7 @@ export class DefaultExecutor extends BaseExecutor {
     for (const hook of desc.hooks || []) HEADER_HOOKS[hook]?.(headers, credentials);
     applyAuth(headers, desc, credentials);
     const isAnthropicOfficial =
-      this.provider === "claude" ||
-      this.provider === "anthropic" ||
+      isAnthropicNativeProvider(this.provider) ||
       (this.provider?.startsWith?.("anthropic-compatible-") &&
         (() => {
           const baseUrl = credentials?.providerSpecificData?.baseUrl || "";

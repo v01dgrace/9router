@@ -3,6 +3,7 @@
  */
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { isModelLimitationError } from "../config/errorConfig.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
@@ -332,15 +333,8 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       }
 
       // Check if should fallback to next model. Model-specific context length / max_tokens
-      // limits must not abort the combo — allow fallback to models with larger context.
-      const lowerErr = errorText.toLowerCase();
-      const isContextOrModelLimitation = lowerErr.includes("max_tokens") ||
-        lowerErr.includes("context_length") ||
-        lowerErr.includes("context length") ||
-        lowerErr.includes("prompt is too long") ||
-        lowerErr.includes("too many tokens") ||
-        lowerErr.includes("exceeds the limit") ||
-        lowerErr.includes("not supported");
+      // or tool capabilities limits must not abort the combo — allow fallback to other models.
+      const isContextOrModelLimitation = isModelLimitationError(errorText);
 
       const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
 

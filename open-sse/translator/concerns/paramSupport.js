@@ -1,4 +1,6 @@
 import { getCapabilitiesForModel } from "../../providers/capabilities.js";
+import { resolveProviderAlias } from "../../services/model.js";
+import { isAnthropicNativeProvider } from "../formats/claude.js";
 
 // Strip request params a given provider/model rejects upstream (e.g. HTTP 400).
 // Config-driven: add a rule instead of scattering `delete body.x` across executors.
@@ -38,11 +40,12 @@ function clampNumber(body, key, ceiling) {
 // Remove unsupported params from body in place; returns body.
 export function stripUnsupportedParams(provider, model, body) {
   if (!model || !body || typeof body !== "object") return body;
-  if (provider !== "claude" && provider !== "anthropic" && !provider?.startsWith?.("anthropic-compatible") && body.context_management !== undefined) {
+  const canonicalProvider = resolveProviderAlias(provider);
+  if (!isAnthropicNativeProvider(canonicalProvider) && !canonicalProvider?.startsWith?.("anthropic-compatible") && body.context_management !== undefined) {
     delete body.context_management;
   }
   for (const rule of STRIP_RULES) {
-    if (rule.provider && rule.provider !== provider) continue;
+    if (rule.provider && resolveProviderAlias(rule.provider) !== canonicalProvider) continue;
     if (!matches(rule, model)) continue;
     for (const key of rule.drop || []) {
       if (body[key] !== undefined) delete body[key];
@@ -50,10 +53,26 @@ export function stripUnsupportedParams(provider, model, body) {
     // CF Workers AI oneOf root schema only accepts content as plain string (#1926)
     if (rule.flattenContent && Array.isArray(body.messages)) {
       for (const msg of body.messages) {
-        if (msg && Array.isArray(msg.content)) {
+        if (!msg || typeof msg !== "object") continue;
+        if (!msg.role) msg.role = "user";
+        if (Array.isArray(msg.content)) {
           msg.content = msg.content
-            .map(b => (b?.type === "text" && typeof b.text === "string") ? b.text : "")
+            .map(b => {
+              if (typeof b === "string") return b;
+              if (b && typeof b === "object") {
+                if (typeof b.text === "string") return b.text;
+                if (typeof b.content === "string") return b.content;
+                if (Array.isArray(b.content)) {
+                  return b.content.map(c => (typeof c === "string" ? c : (c?.text || ""))).join("");
+                }
+              }
+              return "";
+            })
             .join("");
+        } else if (msg.content == null) {
+          msg.content = "";
+        } else if (typeof msg.content !== "string") {
+          msg.content = String(msg.content);
         }
       }
     }

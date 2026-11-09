@@ -20,6 +20,33 @@ const CODEX_SOURCE_TO_TARGET = {
 };
 
 /**
+ * Detect if the first received chunk is a structured JSON error body masquerading as 200 OK.
+ * Returns null if valid stream chunk, or { status, error } if an upstream error was detected.
+ */
+function detectFirstChunkError(firstChunk) {
+  if (!firstChunk) return null;
+  const chunkStr = new TextDecoder().decode(firstChunk);
+  const trimmed = chunkStr.trim();
+  if (!trimmed.startsWith("{") || (!trimmed.includes('"error"') && !trimmed.includes('"error_code"') && !trimmed.includes('"detail"'))) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed.error || parsed.error_code || (parsed.detail && !parsed.choices && !parsed.delta)) {
+      const errMsg = typeof parsed.error === "string"
+        ? parsed.error
+        : parsed.error?.message || parsed.error_msg || parsed.detail || JSON.stringify(parsed);
+      const rawStatus = parsed.error?.status || parsed.status || 502;
+      const status = typeof rawStatus === "number" && rawStatus >= 400 && rawStatus < 600 ? rawStatus : 502;
+      return { status, error: errMsg };
+    }
+  } catch {
+    // Not a pure JSON error object, treat as valid streaming content
+  }
+  return null;
+}
+
+/**
  * Determine which SSE transform stream to use based on provider/format.
  */
 function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey }) {
@@ -38,6 +65,24 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
   }
 
   return createPassthroughStreamWithLogger(provider, reqLogger, model, connectionId, body, onStreamComplete, apiKey);
+}
+
+/**
+ * Create a structured failure result for an aborted or invalid upstream stream.
+ */
+function failStreamResponse({ status, error, log, reqTag, provider, model, streamController, tag = "BLOCKED" }) {
+  const errMsg = typeof error === "string" ? error : error?.message || String(error);
+  if (log?.errorLine) log.errorLine(reqTag, "✗", `${tag} ${status} · ${provider}/${model} · ${errMsg}`);
+  streamController?.handleError?.(error instanceof Error ? error : new Error(errMsg));
+  return {
+    success: false,
+    status,
+    error: errMsg,
+    response: new Response(JSON.stringify({ error: { message: `[${status}]: ${errMsg}` } }), {
+      status,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    }),
+  };
 }
 
 /**
@@ -105,66 +150,29 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     const { done, value } = await reader.read();
     if (done || !value || value.length === 0) {
       try { reader.releaseLock?.(); } catch {}
-      const status = 502;
-      const shortMsg = "Upstream stream ended before a valid event (empty stream)";
-      if (log?.errorLine) log.errorLine(reqTag, "✗", `BLOCKED ${status} · ${provider}/${model} · ${shortMsg}`);
-      streamController?.handleError?.(new Error(shortMsg));
-      return {
-        success: false,
-        status,
-        error: shortMsg,
-        response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
-          status,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-        }),
-      };
+      return failStreamResponse({
+        status: 502,
+        error: "Upstream stream ended before a valid event (empty stream)",
+        log, reqTag, provider, model, streamController, tag: "BLOCKED",
+      });
     }
     firstChunk = value;
   } catch (readErr) {
-    const status = 502;
-    const shortMsg = `Upstream stream read error: ${readErr?.message || readErr}`;
-    if (log?.errorLine) log.errorLine(reqTag, "✗", `BLOCKED ${status} · ${provider}/${model} · ${shortMsg}`);
-    streamController?.handleError?.(readErr);
-    return {
-      success: false,
-      status,
-      error: shortMsg,
-      response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
-        status,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-      }),
-    };
+    return failStreamResponse({
+      status: 502,
+      error: `Upstream stream read error: ${readErr?.message || readErr}`,
+      log, reqTag, provider, model, streamController, tag: "BLOCKED",
+    });
   }
 
   // Check if first chunk contains a structured JSON error object returned as 200 OK
-  if (firstChunk) {
-    const chunkStr = new TextDecoder().decode(firstChunk);
-    const trimmed = chunkStr.trim();
-    if (trimmed.startsWith("{") && (trimmed.includes('"error"') || trimmed.includes('"error_code"') || trimmed.includes('"detail"'))) {
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed.error || parsed.error_code || (parsed.detail && !parsed.choices && !parsed.delta)) {
-          const errMsg = typeof parsed.error === "string"
-            ? parsed.error
-            : parsed.error?.message || parsed.error_msg || parsed.detail || JSON.stringify(parsed);
-          const rawStatus = parsed.error?.status || parsed.status || 502;
-          const status = typeof rawStatus === "number" && rawStatus >= 400 && rawStatus < 600 ? rawStatus : 502;
-          if (log?.errorLine) log.errorLine(reqTag, "✗", `ERROR ${status} · ${provider}/${model} · ${errMsg}`);
-          streamController?.handleError?.(new Error(errMsg));
-          return {
-            success: false,
-            status,
-            error: errMsg,
-            response: new Response(JSON.stringify({ error: { message: `[${status}]: ${errMsg}` } }), {
-              status,
-              headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-            }),
-          };
-        }
-      } catch {
-        // Not a pure JSON error object, treat as valid streaming content
-      }
-    }
+  const detectedError = detectFirstChunkError(firstChunk);
+  if (detectedError) {
+    return failStreamResponse({
+      status: detectedError.status,
+      error: detectedError.error,
+      log, reqTag, provider, model, streamController, tag: "ERROR",
+    });
   }
 
   // First valid event/chunk confirmed — notify request success callback

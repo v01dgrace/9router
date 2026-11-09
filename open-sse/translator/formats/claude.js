@@ -86,11 +86,16 @@ export function fixToolUseOrdering(messages) {
   return merged;
 }
 
+// Check if provider is an official Anthropic endpoint (claude or anthropic alias).
+export function isAnthropicNativeProvider(provider) {
+  return provider === "claude" || provider === "anthropic";
+}
+
 // Models that reject thinking.type "adaptive" + output_config.effort (Opus 4.5+/Sonnet 4.6+ only)
 const ADAPTIVE_THINKING_UNSUPPORTED = /haiku/i;
 
 function handlesThinkingBlocks(provider) {
-  return provider === "claude" || provider === "anthropic" || provider?.startsWith("anthropic-compatible") || provider === "deepseek";
+  return isAnthropicNativeProvider(provider) || provider?.startsWith("anthropic-compatible") || provider === "deepseek";
 }
 
 function buildThinkingPlaceholder(provider) {
@@ -267,7 +272,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     delete body.output_config;
   }
   // quirk: non-Anthropic endpoints reject Anthropic's context_management (400 invalid params)
-  if (provider !== "claude" && provider !== "anthropic") {
+  if (!isAnthropicNativeProvider(provider)) {
     delete body.context_management;
   }
 
@@ -366,7 +371,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
           // Claude native: preserve valid signatures, drop invalid blocks.
           // anthropic-compatible: replace with default (safe fallback for lenient upstreams).
           // DeepSeek: keep existing thinking as-is; add an unsigned placeholder only if missing.
-          const isClaudeNative = provider === "claude" || provider === "anthropic";
+          const isClaudeNative = isAnthropicNativeProvider(provider);
           const isDeepSeek = provider === "deepseek";
           const kept = [];
           for (const block of msg.content) {
@@ -405,7 +410,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
   if (body.tools && Array.isArray(body.tools)) {
     // Strip built-in tools (e.g. web_search_20250305) and normalize to Anthropic-native shape
     // (drop `type` field, fold `function.{name,description,parameters}`) for non-Anthropic providers
-    if (provider !== "claude" && provider !== "anthropic") {
+    if (!isAnthropicNativeProvider(provider)) {
       body.tools = body.tools
         .filter(tool => !tool.type || tool.type === "function")
         .map(tool => {
