@@ -7,9 +7,9 @@ FROM base AS builder
 
 RUN apk --no-cache upgrade && apk --no-cache add python3 make g++ linux-headers
 
-COPY package.json ./
+COPY package.json package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
-  npm install
+  npm ci --prefer-offline --no-audit 2>/dev/null || npm install --no-audit
 
 COPY . ./
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -51,6 +51,8 @@ RUN apk --no-cache upgrade && apk --no-cache add su-exec && \
   chmod +x /entrypoint.sh
 
 EXPOSE 20128
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:20128/ || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "custom-server.js"]

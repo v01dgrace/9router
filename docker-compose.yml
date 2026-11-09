@@ -1,14 +1,24 @@
 services:
   9router:
     image: decolua/9router:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: 9router
     restart: always
+    init: true
     ports:
       - "20128:20128"
     volumes:
-      - 9router-data:/app/data
+      # Option 1 (Recommended): Mount local user data (~/.9router) to persist config & DB
+      - ${HOME}/.9router:/app/data
+      # Option 2 (Project-local data directory):
+      # - ./data:/app/data
+      # Option 3 (Docker named volume):
+      # - 9router-data:/app/data
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       DATA_DIR: /app/data
       PORT: "20128"
@@ -17,6 +27,11 @@ services:
       HEADROOM_URL: http://headroom:8787
     depends_on:
       - headroom
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   headroom:
     image: ghcr.io/chopratejas/headroom:latest
@@ -24,7 +39,13 @@ services:
     restart: always
     ports:
       - "8787:8787"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-volumes:
-  9router-data:
-    name: 9router-data
+# Optional named volume if not using host bind-mount
+# volumes:
+#   9router-data:
+#     name: 9router-data

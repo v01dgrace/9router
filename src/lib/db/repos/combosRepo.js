@@ -2,13 +2,27 @@ import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 
+function normalizeModelItem(item) {
+  if (typeof item === "string") return item;
+  if (item && typeof item === "object") {
+    return item.model || item.id || item.name || null;
+  }
+  return item ? String(item) : null;
+}
+
+function normalizeModels(raw) {
+  const parsed = parseJson(raw, []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map(normalizeModelItem).filter(Boolean);
+}
+
 function rowToCombo(row) {
   if (!row) return null;
   return {
     id: row.id,
     name: row.name,
     kind: row.kind,
-    models: parseJson(row.models, []),
+    models: normalizeModels(row.models),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -39,7 +53,7 @@ export async function createCombo(data) {
     id: uuidv4(),
     name: data.name,
     kind: data.kind || null,
-    models: data.models || [],
+    models: (data.models || []).map(normalizeModelItem).filter(Boolean),
     createdAt: now,
     updatedAt: now,
   };
@@ -56,7 +70,9 @@ export async function updateCombo(id, data) {
   db.transaction(() => {
     const row = db.get(`SELECT * FROM combos WHERE id = ?`, [id]);
     if (!row) return;
-    const merged = { ...rowToCombo(row), ...data, updatedAt: new Date().toISOString() };
+    const existing = rowToCombo(row);
+    const updatedModels = data.models ? data.models.map(normalizeModelItem).filter(Boolean) : existing.models;
+    const merged = { ...existing, ...data, models: updatedModels, updatedAt: new Date().toISOString() };
     db.run(
       `UPDATE combos SET name = ?, kind = ?, models = ?, updatedAt = ? WHERE id = ?`,
       [merged.name, merged.kind, stringifyJson(merged.models || []), merged.updatedAt, id]

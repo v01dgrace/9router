@@ -1,5 +1,6 @@
 import { execFileSync, execSync } from "child_process";
 import path from "path";
+import fs from "fs";
 
 // Extras that improve headroom compression quality. `proxy` is the base;
 // `code` adds tree-sitter AST compression; `ml` adds Kompress-v2 HF model.
@@ -76,9 +77,15 @@ function pythonCandidates() {
   const list = [];
   const bin = findHeadroomBinary();
   if (bin) {
-    const dir = path.dirname(bin);
+    let realBin = bin;
+    try { realBin = fs.realpathSync(bin); } catch {}
+    const dir = path.dirname(realBin);
     const names = IS_WIN ? ["python.exe", "python3.exe"] : ["python3", "python3.13", "python"];
     for (const n of names) list.push(path.join(dir, n));
+    if (realBin !== bin) {
+      const origDir = path.dirname(bin);
+      for (const n of names) list.push(path.join(origDir, n));
+    }
   }
   for (const dir of EXTRA_BINS) {
     if (!dir) continue;

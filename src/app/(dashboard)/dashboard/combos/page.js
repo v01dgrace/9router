@@ -313,12 +313,15 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
               {combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
-                combo.models.slice(0, 3).map((model, index) => (
-                  <code key={index} className="inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5">
-                    <span>{model}</span>
-                    <CapacityBadges caps={getCaps?.(model)} />
-                  </code>
-                ))
+                combo.models.slice(0, 3).map((m, index) => {
+                  const modelStr = typeof m === "string" ? m : (m?.model || m?.id || String(m));
+                  return (
+                    <code key={index} className="inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5">
+                      <span>{modelStr}</span>
+                      <CapacityBadges caps={getCaps?.(modelStr)} />
+                    </code>
+                  );
+                })
               )}
               {combo.models.length > 3 && (
                 <span className="text-[10px] text-text-muted">+{combo.models.length - 3} more</span>
@@ -334,7 +337,7 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
                   title="Pick the model that fuses panel answers"
                 >
                   <span className="material-symbols-outlined text-[13px]">gavel</span>
-                  <span className="truncate">{judge || `Auto — ${combo.models[0] || "first model"}`}</span>
+                  <span className="truncate">{judge || `Auto — ${(typeof combo.models[0] === "string" ? combo.models[0] : combo.models[0]?.model) || "first model"}`}</span>
                 </button>
                 {judge && (
                   <button
