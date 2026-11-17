@@ -330,7 +330,10 @@ function toResponsesToolChoice(choice, tools) {
   if (choice.type !== OPENAI_BLOCK.FUNCTION) return choice;
   const rawName = choice.function?.name ?? choice.name;
   const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_TOOL_NAME_LEN) : "";
-  const declared = Array.isArray(tools) && tools.some((t) => t.type === OPENAI_BLOCK.FUNCTION && t.name === name);
+  // Tools arrive flat ({name}) from the messages path and may still be chat-shaped
+  // ({function:{name}}) when the client already sent a Responses-style body with input[].
+  const declared = Array.isArray(tools)
+    && tools.some((t) => t?.type === OPENAI_BLOCK.FUNCTION && (t.name ?? t.function?.name) === name);
   return name && declared ? { type: OPENAI_BLOCK.FUNCTION, name } : undefined;
 }
 
@@ -344,6 +347,11 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
     }
     delete out.max_tokens;
     delete out.max_completion_tokens;
+    if (out.tool_choice !== undefined) {
+      const toolChoice = toResponsesToolChoice(out.tool_choice, out.tools);
+      if (toolChoice === undefined) delete out.tool_choice;
+      else out.tool_choice = toolChoice;
+    }
     return out;
   }
 
