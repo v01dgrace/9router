@@ -1,6 +1,6 @@
 // RTK port: compress tool_result content in LLM request bodies
 // Applied in chatCore on the source-format body, before translateRequest.
-import { RAW_CAP, MIN_COMPRESS_SIZE } from "./constants.js";
+import { RAW_CAP, MIN_COMPRESS_SIZE, HEADROOM_TOOL_OUTPUT_MAX_DEPTH, TOOL_OUTPUT_TEXT_FIELDS } from "./constants.js";
 import { autoDetectFilter } from "./autodetect.js";
 import { safeApply } from "./applyFilter.js";
 
@@ -12,6 +12,13 @@ export function compressMessages(body, enabled) {
   // Kiro format: conversationState.history + conversationState.currentMessage
   if (body.conversationState) {
     return compressKiroFormat(body, enabled);
+  }
+
+  // Gemini-family (gemini, vertex, and the antigravity/gemini-cli envelope): tool output
+  // lives in contents[].parts[].functionResponse.response (#5674).
+  const geminiContents = body.request?.contents || body.contents;
+  if (Array.isArray(geminiContents)) {
+    return compressGeminiFormat(geminiContents);
   }
 
   // Support both OpenAI/Claude "messages" and OpenAI Responses "input"
@@ -112,6 +119,40 @@ function compressKiroFormat(body, enabled) {
     }
   } catch (e) {
     console.warn("[RTK] compressKiroFormat error:", e.message);
+    return null;
+  }
+  return stats;
+}
+
+// A functionResponse.response is an object, not text. Only plain-text leaves are compressed:
+// serialized JSON strings and error payloads are left untouched, and traversal is depth-bounded.
+function compressGeminiLeaf(owner, key, stats, depth) {
+  if (depth > HEADROOM_TOOL_OUTPUT_MAX_DEPTH) return;
+  const value = owner[key];
+  if (typeof value === "string") {
+    try { JSON.parse(value); return; } catch { /* plain text */ }
+    owner[key] = compressText(value, stats, "gemini-function-response");
+  } else if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) compressGeminiLeaf(value, i, stats, depth + 1);
+  } else if (value && typeof value === "object") {
+    if (value.error !== undefined || value.is_error === true || value.status === "error") return;
+    for (const field of TOOL_OUTPUT_TEXT_FIELDS) {
+      if (Object.hasOwn(value, field)) compressGeminiLeaf(value, field, stats, depth + 1);
+    }
+  }
+}
+
+function compressGeminiFormat(contents) {
+  const stats = { bytesBefore: 0, bytesAfter: 0, hits: [] };
+  try {
+    for (const content of contents) {
+      if (!Array.isArray(content?.parts)) continue;
+      for (const part of content.parts) {
+        if (part?.functionResponse) compressGeminiLeaf(part.functionResponse, "response", stats, 0);
+      }
+    }
+  } catch (e) {
+    console.warn("[RTK] compressGeminiFormat error:", e.message);
     return null;
   }
   return stats;

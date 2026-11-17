@@ -1,6 +1,6 @@
 import { FORMATS } from "../translator/formats.js";
 import { ROLE, OPENAI_BLOCK, CLAUDE_BLOCK, COMMANDCODE_BLOCK, RESPONSES_ITEM } from "../translator/schema/index.js";
-import { HEADROOM_TOOL_OUTPUT_MAX_DEPTH } from "./constants.js";
+import { HEADROOM_TOOL_OUTPUT_MAX_DEPTH, TOOL_OUTPUT_TEXT_FIELDS } from "./constants.js";
 import {
   openaiResponsesToOpenAIRequest,
   openaiToOpenAIResponsesRequest,
@@ -121,7 +121,7 @@ function collectToolOutputText(body, format) {
       for (let i = 0; i < value.length; i++) visit(value, i, depth + 1);
     } else if (value && typeof value === "object") {
       if (value.type && value.type !== OPENAI_BLOCK.TEXT && value.type !== RESPONSES_ITEM.INPUT_TEXT) return;
-      for (const field of ["result", "output", "content", "text"]) {
+      for (const field of TOOL_OUTPUT_TEXT_FIELDS) {
         if (Object.hasOwn(value, field)) visit(value, field, depth + 1);
       }
     }

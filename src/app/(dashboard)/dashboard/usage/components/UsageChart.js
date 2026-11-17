@@ -12,12 +12,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import Card from "@/shared/components/Card";
-
-const fmtTokens = (n) => {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n || 0);
-};
+import { fmtTokens } from "@/shared/utils/fmtTokens";
 
 const fmtCost = (n) => `$${(n || 0).toFixed(4)}`;
 const fmtRequests = (n) => String(n || 0);

@@ -318,6 +318,22 @@ function buildReasoningInputItem(msg) {
 /**
  * Convert OpenAI Chat Completions to OpenAI Responses API format
  */
+// Chat tool_choice -> Responses tool_choice (#5718). Strings pass through; Chat's nested
+// {type:"function",function:{name}} becomes flat {type:"function",name}; {type:auto|required|none}
+// collapses to the bare string. A named choice whose tool was filtered out is dropped, because
+// several Responses upstreams have no executor guard and would 400 on a dangling name.
+const TOOL_CHOICE_MODES = new Set(["auto", "required", "none"]);
+function toResponsesToolChoice(choice, tools) {
+  if (typeof choice === "string") return choice;
+  if (!choice || typeof choice !== "object" || Array.isArray(choice)) return undefined;
+  if (TOOL_CHOICE_MODES.has(choice.type)) return choice.type;
+  if (choice.type !== OPENAI_BLOCK.FUNCTION) return choice;
+  const rawName = choice.function?.name ?? choice.name;
+  const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_TOOL_NAME_LEN) : "";
+  const declared = Array.isArray(tools) && tools.some((t) => t.type === OPENAI_BLOCK.FUNCTION && t.name === name);
+  return name && declared ? { type: OPENAI_BLOCK.FUNCTION, name } : undefined;
+}
+
 export function openaiToOpenAIResponsesRequest(model, body, stream, credentials) {
   // Body already in Responses API format (e.g. Cursor CLI calling /chat/completions with input[])
   if (body.input) {
@@ -443,6 +459,9 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
       return tool;
     }).filter(Boolean);
   }
+
+  const toolChoice = toResponsesToolChoice(body.tool_choice, result.tools);
+  if (toolChoice !== undefined) result.tool_choice = toolChoice;
 
   // Pass through other relevant fields
   if (body.temperature !== undefined) result.temperature = body.temperature;

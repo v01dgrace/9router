@@ -1,3 +1,14 @@
+# Unreleased
+
+## Fixes
+- **Chat**: absent `stream` in `/v1/chat/completions` now means non-streaming (was SSE); Gemini-style formats and `forceStream` providers still stream (#5677)
+- **Transport**: happy-eyeballs attempt budget 250ms -> 1000ms so dual-stack hosts work on links with RTT above 250ms (#5721); overridable with `NINEROUTER_HAPPY_EYEBALLS_TIMEOUT_MS`
+- **STT**: forward `timestamp_granularities[]` to OpenAI-compatible transcribers (#5663)
+- **Antigravity**: the `opencode` brand rewrite no longer touches paths, flags or identifiers (#5650)
+- **Dashboard**: usage charts format token counts in billions (#5670)
+- **Responses**: chat `tool_choice` is carried into Responses requests (named choice flattened, dangling names dropped) (#5718)
+- **RTK**: tool output in Gemini-family `contents[].parts[].functionResponse` is now compressed (#5674)
+
 # v0.5.116 (2026-11-08)
 
 ## Features
