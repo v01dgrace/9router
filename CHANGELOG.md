@@ -6,6 +6,7 @@
 - **STT**: forward `timestamp_granularities[]` to OpenAI-compatible transcribers (#5663)
 - **Antigravity**: the `opencode` brand rewrite no longer touches paths, flags or identifiers (#5650)
 - **Dashboard**: usage charts format token counts in billions (#5670)
+- **Provider nodes**: `/api/provider-nodes/validate` reports an unreachable node as a validation result instead of HTTP 500, and no longer says "provider node too slow" for a connect timeout (#5721)
 - **Responses**: chat `tool_choice` is carried into Responses requests (named choice flattened, dangling names dropped) (#5718)
 - **RTK**: tool output in Gemini-family `contents[].parts[].functionResponse` is now compressed (#5674)
 
