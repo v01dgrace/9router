@@ -226,6 +226,14 @@ async function transcribeHuggingFace(cfg, file, model, token) {
   return jsonResponse({ text: data.text || "" });
 }
 
+// Groq and OpenAI document exactly these two values for timestamp_granularities[] (#5663).
+// Anything else is dropped here rather than relayed, which also bounds how many parts reach upstream.
+const TIMESTAMP_GRANULARITIES = ["word", "segment"];
+function documentedTimestampGranularities(formData) {
+  const requested = new Set(formData.getAll("timestamp_granularities[]"));
+  return TIMESTAMP_GRANULARITIES.filter((g) => requested.has(g));
+}
+
 // Default: OpenAI/Groq/Whisper-compatible multipart
 async function transcribeOpenAICompatible(cfg, file, model, token, formData) {
   const fd = new FormData();
@@ -235,7 +243,7 @@ async function transcribeOpenAICompatible(cfg, file, model, token, formData) {
     const v = formData.get(k);
     if (v !== null && v !== undefined && v !== "") fd.append(k, v);
   }
-  for (const v of formData.getAll("timestamp_granularities[]")) fd.append("timestamp_granularities[]", v);
+  for (const v of documentedTimestampGranularities(formData)) fd.append("timestamp_granularities[]", v);
   const res = await fetch(cfg.baseUrl, { method: "POST", headers: buildAuthHeaders(cfg, token), body: fd });
   if (!res.ok) return upstreamError(res);
   const ct = res.headers.get("content-type") || "application/json";

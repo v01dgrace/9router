@@ -37,6 +37,32 @@ describe("#5663 STT forwards timestamp_granularities[]", () => {
     });
     expect(sent.getAll("timestamp_granularities[]")).toEqual(["word", "segment"]);
   });
+
+  const forwarded = async (values) => {
+    let sent;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      sent = init.body;
+      return new Response(JSON.stringify({ text: "x" }), { headers: { "content-type": "application/json" } });
+    }));
+    const formData = new FormData();
+    formData.append("file", new File(["a"], "a.wav", { type: "audio/wav" }));
+    for (const v of values) formData.append("timestamp_granularities[]", v);
+    await handleSttCore({
+      provider: "groq", model: "whisper-large-v3", formData, credentials: { apiKey: "k" },
+      sttConfig: { baseUrl: "https://example.test/v1/audio/transcriptions", format: "openai" },
+    });
+    return sent.getAll("timestamp_granularities[]");
+  };
+
+  it("forwards only the values Groq and OpenAI document (word, segment), once each", async () => {
+    expect(await forwarded(["word", "bogus", "segment", "word", "<script>"])).toEqual(["word", "segment"]);
+  });
+  it("sends no granularity at all when none is valid", async () => {
+    expect(await forwarded(["bogus", ""])).toEqual([]);
+  });
+  it("does not forward an unbounded number of parts", async () => {
+    expect(await forwarded(Array(500).fill("word"))).toEqual(["word"]);
+  });
 });
 
 describe("#5670 fmtTokens handles billions", () => {
